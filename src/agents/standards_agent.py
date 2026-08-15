@@ -110,6 +110,26 @@ def _parse_llm_response(response: str) -> dict:
             return json.loads(fixed)
 
 
+def _normalize_violations(raw: Any) -> list[dict]:
+    """Приводит ответ LLM к плоскому списку dict-нарушений.
+
+    Модель может вернуть ``violations`` как вложенный список
+    (напр. ``[[{...}, {...}]]``) или с не-dict элементами — без этой
+    нормализации последующий ``v.get("rule_id")`` падает (adversarial #3,
+    реальный сбой прогона). Рекурсивно «разворачиваем» списки и оставляем
+    только dict-элементы.
+    """
+    result: list[dict] = []
+    if not isinstance(raw, list):
+        return result
+    for item in raw:
+        if isinstance(item, dict):
+            result.append(item)
+        elif isinstance(item, list):
+            result.extend(_normalize_violations(item))
+    return result
+
+
 def _analyze_chunk(chunk_data: list[dict], llm: RouterAIProvider, settings: Settings) -> list[dict]:
     tc_json = json.dumps(chunk_data, ensure_ascii=True)
     user_msg = f"Проверь тест-кейсы на соответствие стандартам QA:\n{tc_json}\nВерни JSON."
@@ -136,7 +156,7 @@ def _analyze_chunk(chunk_data: list[dict], llm: RouterAIProvider, settings: Sett
         return []
 
     data = _parse_llm_response(response)
-    return data.get("violations", [])
+    return _normalize_violations(data.get("violations", []))
 
 
 def run_standards_agent(

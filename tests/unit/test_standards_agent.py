@@ -96,3 +96,32 @@ def test_compliance_clamped_to_zero(monkeypatch):
 
     report = run_standards_agent(test_cases=_make_tcs(3))
     assert 0.0 <= report.compliance_percentage <= 100.0
+
+
+def test_nested_list_violations_do_not_crash(monkeypatch):
+    """Реальный сбой: модель вернула violations как вложенный список
+    ([[{...},{...}]]). Должны развернуться без падения (adversarial #3)."""
+    import src.agents.standards_agent as sa
+
+    rules = [{"id": "R-0"}, {"id": "R-1"}]
+    monkeypatch.setattr(sa, "load_standards_rules", lambda: {"rules": rules})
+    sa.num_active_rules.cache_clear()
+    sa.rule_classification.cache_clear()
+
+    nested = json.dumps(
+        {
+            "violations": [
+                [
+                    {"rule_id": "R-0", "test_case_id": "TC-0", "description": "x"},
+                    {"rule_id": "R-1", "test_case_id": "TC-1", "description": "y"},
+                ]
+            ]
+        }
+    )
+    stub = ScriptedLLM(standards_response=nested)
+    apply_llm_patch(monkeypatch, stub)
+
+    report = run_standards_agent(test_cases=_make_tcs(3))
+    assert isinstance(report.violations, list)
+    assert len(report.violations) == 2
+    assert all(isinstance(v, dict) for v in report.violations)
