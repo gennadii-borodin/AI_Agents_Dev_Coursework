@@ -8,7 +8,7 @@ import json_repair
 from src.config import Settings, get_settings
 from src.llm_provider import RouterAIProvider
 from src.models import CoverageReport, Requirement, TestCase
-from src.tools.rag_tool import rag_search_by_requirement
+from src.tools.rag_tool import rag_search_by_requirement, rag_search
 from src.tools.sql_tool import (
     get_all_requirements,
     get_all_test_cases,
@@ -97,29 +97,63 @@ def run_coverage_agent(
     if llm is None:
         llm = RouterAIProvider(settings)
 
-    if requirements is None:
-        req_data = get_requirements_by_ids(requirement_ids) if requirement_ids else get_all_requirements()
-        requirements = [Requirement(**r) for r in req_data]
+    from src.tracing import trace_agent, set_span_output
 
-    if test_cases is None:
-        tc_data = get_all_test_cases()
-        test_cases = [TestCase(**tc) for tc in tc_data]
+    with trace_agent(
+        "Coverage Agent",
+        **{"agent.type": "coverage"},
+    ) as span:
 
-    if requirement_ids:
-        req_set = set(requirement_ids)
-        requirements = [r for r in requirements if r.requirement_id in req_set]
-        test_cases = [tc for tc in test_cases if tc.req in req_set]
+        if requirements is None:
+            req_data = get_requirements_by_ids(requirement_ids) if requirement_ids else get_all_requirements()
+            requirements = [Requirement(**r) for r in req_data]
 
-    unlinked = get_tests_without_requirements()
-    tests_without_requirements = [tc["test_case_id"] for tc in unlinked]
+        if test_cases is None:
+            tc_data = get_all_test_cases()
+            test_cases = [TestCase(**tc) for tc in tc_data]
 
-    req_data = _prepare_requirements_data([r.model_dump() for r in requirements])
-    tc_data = _prepare_test_cases_data([tc.model_dump() for tc in test_cases])
+        if requirement_ids:
+            req_set = set(requirement_ids)
+            requirements = [r for r in requirements if r.requirement_id in req_set]
+            test_cases = [tc for tc in test_cases if tc.req in req_set]
 
-    req_json = json.dumps(req_data, ensure_ascii=False)
-    tc_json = json.dumps(tc_data, ensure_ascii=False)
+        unlinked = get_tests_without_requirements()
+        tests_without_requirements = [tc["test_case_id"] for tc in unlinked]
 
-    user_message = f"""Проанализируй требования и тест-кейсы.
+        if span is not None:
+            span.set_attribute("requirements.count", len(requirements))
+            span.set_attribute("test_cases.count", len(test_cases))
+
+        req_data = _prepare_requirements_data([r.model_dump() for r in requirements])
+        tc_data = _prepare_test_cases_data([tc.model_dump() for tc in test_cases])
+
+        req_json = json.dumps(req_data, ensure_ascii=False)
+        tc_json = json.dumps(tc_data, ensure_ascii=False)
+
+        similar_tests_json = "[]"
+        try:
+            if req_data:
+                combined_req_text = " ".join(
+                    f"{r['title']} {r['requirement_text']}" for r in req_data
+                )
+                similar_tests = rag_search(
+                    "test_cases", combined_req_text, top_k=settings.rag_top_k
+                )
+                similar_tests_json = json.dumps(
+                    [
+                        {
+                            "test_case_id": st["id"],
+                            "title": st["title"],
+                            "similarity": round(st["similarity"], 3),
+                        }
+                        for st in similar_tests
+                    ],
+                    ensure_ascii=False,
+                )
+        except Exception as e:
+            logger.warning(f"RAG similarity search skipped: {e}")
+
+        user_message = f"""Проанализируй требования и тест-кейсы.
 
 ## Требования ({len(req_data)}):
 {req_json}
@@ -130,34 +164,42 @@ def run_coverage_agent(
 ## Тесты без требований (req пуст или null):
 {json.dumps(tests_without_requirements, ensure_ascii=False)}
 
+## Семантически похожие тест-кейсы (возможно покрывающие требования косвенно, без явной привязки REQ):
+{similar_tests_json}
+
 Верни отчёт о покрытии в формате JSON."""
 
-    logger.info("Calling LLM for coverage analysis...")
-    response = llm.chat_completion(
-        messages=[
-            {"role": "system", "content": COVERAGE_SYSTEM_PROMPT},
-            {"role": "user", "content": user_message},
-        ],
-        model=settings.model_senior,
-        temperature=0.1,
-        json_mode=True,
-    )
+        logger.info("Calling LLM for coverage analysis...")
 
-    try:
-        data = json.loads(response)
-        return CoverageReport(**data)
-    except json.JSONDecodeError as e:
-        logger.warning(f"JSON parse error, attempting repair: {e}")
+        response = llm.chat_completion(
+            messages=[
+                {"role": "system", "content": COVERAGE_SYSTEM_PROMPT},
+                {"role": "user", "content": user_message},
+            ],
+            model=settings.model_senior,
+            temperature=0.1,
+            json_mode=True,
+        )
+
+        if span is not None:
+            span.set_attribute("llm.response.length", len(response) if response else 0)
+
         try:
-            repaired = json_repair.repair_json(response, return_objects=True)
-            if isinstance(repaired, str):
-                data = json.loads(repaired)
-            elif isinstance(repaired, dict):
-                data = repaired
-            else:
-                raise ValueError(f"Unexpected type: {type(repaired)}")
+            data = json.loads(response)
+            set_span_output(span, {"total_coverage": data.get("total_coverage")}, mime_type="application/json")
             return CoverageReport(**data)
-        except Exception as e2:
-            logger.error(f"Failed to repair JSON: {e2}")
-            logger.error(f"Raw response: {response[:500]}")
-            raise
+        except json.JSONDecodeError:
+            try:
+                repaired = json_repair.repair_json(response, return_objects=True)
+                if isinstance(repaired, str):
+                    data = json.loads(repaired)
+                elif isinstance(repaired, dict):
+                    data = repaired
+                else:
+                    raise ValueError(f"Unexpected type: {type(repaired)}")
+                set_span_output(span, {"total_coverage": data.get("total_coverage")}, mime_type="application/json")
+                return CoverageReport(**data)
+            except Exception as e2:
+                logger.error(f"Failed to repair JSON: {e2}")
+                logger.error(f"Raw response: {response[:500]}")
+                raise

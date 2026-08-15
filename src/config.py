@@ -7,6 +7,7 @@ class Settings(BaseSettings):
     openai_api_key: str
     database_url: str
     phoenix_port: int = 6006
+    phoenix_http_endpoint: str = "http://localhost:6006/v1/traces"
 
     model_senior: str = "deepseek/deepseek-v4-pro-0813"
     model_junior: str = "deepseek/deepseek-v4-flash-0731"
@@ -22,6 +23,7 @@ class Settings(BaseSettings):
     class Config:
         env_file = ".env"
         env_file_encoding = "utf-8"
+        extra = "ignore"
 
 
 @lru_cache

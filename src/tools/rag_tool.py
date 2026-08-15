@@ -8,6 +8,12 @@ from pgvector.psycopg import register_vector
 from src.config import Settings, get_settings
 from src.embedding import EmbeddingProvider
 from src.tools.sql_tool import get_connection
+from src.tracing import (
+    trace_retriever,
+    trace_tool,
+    set_span_output,
+    set_retrieval_documents,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -24,53 +30,59 @@ def rag_search(
     embedding_provider = EmbeddingProvider(settings)
 
     try:
-        query_embedding = embedding_provider.embed_text(query)
-    except Exception as e:
-        logger.error(f"Failed to generate embedding: {e}")
-        return []
+        with trace_retriever(collection, query, top_k) as span:
+            try:
+                query_embedding = embedding_provider.embed_text(query)
+            except Exception as e:
+                logger.error(f"Failed to generate embedding: {e}")
+                return []
 
-    table_name = collection
-    if table_name not in ("requirements", "test_cases"):
-        logger.warning(f"Unknown collection: {collection}")
-        return []
+            table_name = collection
+            if table_name not in ("requirements", "test_cases"):
+                logger.warning(f"Unknown collection: {collection}")
+                return []
 
-    embedding_str = "[" + ",".join(map(str, query_embedding)) + "]"
+            embedding_str = "[" + ",".join(map(str, query_embedding)) + "]"
 
-    search_query = f"""
-    SELECT
-        id,
-        similarity(embedding, %s::vector) as sim_score,
-        {", ".join([
-            "requirement_id" if table_name == "requirements" else "test_case_id",
-            "title",
-            "requirement_text" if table_name == "requirements" else "description",
-            "category" if table_name == "requirements" else "test_type",
-            "priority",
-        ])}
-    FROM {table_name}
-    ORDER BY embedding <-> %s::vector
-    LIMIT %s
-    """
+            search_query = f"""
+            SELECT
+                id,
+                (1 - (embedding <=> %s::vector)) as sim_score,
+                {", ".join([
+                    "requirement_id" if table_name == "requirements" else "test_case_id",
+                    "title",
+                    "requirement_text" if table_name == "requirements" else "description",
+                    "category" if table_name == "requirements" else "test_type",
+                    "priority",
+                ])}
+            FROM {table_name}
+            ORDER BY embedding <=> %s::vector
+            LIMIT %s
+            """
 
-    try:
-        with get_connection() as conn:
-            with conn.cursor() as cur:
-                cur.execute(search_query, (embedding_str, embedding_str, top_k))
-                rows = cur.fetchall()
-                results = []
-                for row in rows:
-                    row_dict = dict(row)
-                    results.append({
-                        "id": row_dict.get("requirement_id") or row_dict.get("test_case_id"),
-                        "title": row_dict.get("title", ""),
-                        "content": row_dict.get("requirement_text") or row_dict.get("description", ""),
-                        "category": row_dict.get("category", ""),
-                        "priority": row_dict.get("priority", ""),
-                        "similarity": float(row_dict.get("sim_score", 0)),
-                    })
-                return results
-    except Exception as e:
-        logger.error(f"RAG search failed: {e}")
+            try:
+                with get_connection() as conn:
+                    with conn.cursor() as cur:
+                        cur.execute(search_query, (embedding_str, embedding_str, top_k))
+                        rows = cur.fetchall()
+                        results = []
+                        for row in rows:
+                            row_dict = dict(row)
+                            results.append({
+                                "id": row_dict.get("requirement_id") or row_dict.get("test_case_id"),
+                                "title": row_dict.get("title", ""),
+                                "content": row_dict.get("requirement_text") or row_dict.get("description", ""),
+                                "category": row_dict.get("category", ""),
+                                "priority": row_dict.get("priority", ""),
+                                "similarity": float(row_dict.get("sim_score", 0)),
+                            })
+                        set_retrieval_documents(span, results)
+                        set_span_output(span, {"count": len(results)})
+                        return results
+            except Exception as e:
+                logger.error(f"RAG search failed: {e}")
+                return []
+    except Exception:
         return []
 
 

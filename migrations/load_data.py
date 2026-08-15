@@ -70,7 +70,11 @@ def run_migration(
                 cur.execute("SELECT COUNT(*) FROM requirements")
                 req_count = cur.fetchone()[0]
                 if req_count > 0:
-                    console.print("[yellow]WARN: Данные уже загружены. Пропускаем загрузку.[/yellow]")
+                    console.print("[yellow]WARN: Данные уже загружены.[/yellow]")
+                    if not skip_embeddings and embedding_provider:
+                        _backfill_embeddings(conn, embedding_provider)
+                    else:
+                        console.print("[green]OK: Пропуск эмбеддингов.[/green]")
                     return
 
             embedding_provider = EmbeddingProvider(settings) if not skip_embeddings else None
@@ -205,6 +209,49 @@ def _insert_test_cases(conn, batch: list[tuple]):
             """,
             batch,
         )
+
+
+def _backfill_embeddings(conn, embeddings: EmbeddingProvider) -> None:
+    """Дозаполняет эмбеддинги для строк, где embedding IS NULL (повторный запуск миграции)."""
+    with conn.cursor() as cur:
+        cur.execute("SELECT requirement_id, title, requirement_text FROM requirements WHERE embedding IS NULL")
+        reqs = cur.fetchall()
+    if reqs:
+        console.print(f"[cyan]Backfill эмбеддингов требований: {len(reqs)}[/cyan]")
+        for r in reqs:
+            rid, title, text = r["requirement_id"], r["title"], r["requirement_text"]
+            try:
+                emb = embeddings.embed_text(f"{title} {text}")
+            except Exception as e:
+                logger.warning(f"Failed to embed requirement {rid}: {e}")
+                continue
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE requirements SET embedding = %s::vector WHERE requirement_id = %s",
+                    (emb, rid),
+                )
+            conn.commit()
+
+    with conn.cursor() as cur:
+        cur.execute("SELECT test_case_id, title, description FROM test_cases WHERE embedding IS NULL")
+        tcs = cur.fetchall()
+    if tcs:
+        console.print(f"[cyan]Backfill эмбеддингов тест-кейсов: {len(tcs)}[/cyan]")
+        for tc in tcs:
+            tcid, title, desc = tc["test_case_id"], tc["title"], tc["description"]
+            try:
+                emb = embeddings.embed_text(f"{title} {desc}")
+            except Exception as e:
+                logger.warning(f"Failed to embed test case {tcid}: {e}")
+                continue
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE test_cases SET embedding = %s::vector WHERE test_case_id = %s",
+                    (emb, tcid),
+                )
+            conn.commit()
+
+    console.print("[green]OK: Эмбеддинги актуальны.[/green]")
 
 
 @click.command()

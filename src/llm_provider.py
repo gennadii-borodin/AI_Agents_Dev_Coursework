@@ -6,15 +6,14 @@ import httpx
 from tenacity import retry, stop_after_attempt, wait_exponential
 
 from src.config import Settings, get_settings
+from src.tracing import (
+    trace_llm,
+    set_span_output,
+    set_span_tokens,
+    OTEL_AVAILABLE,
+)
 
 logger = logging.getLogger(__name__)
-
-try:
-    import phoenix.trace as pxtrace
-    PHOENIX_AVAILABLE = True
-except ImportError:
-    PHOENIX_AVAILABLE = False
-    pxtrace = None
 
 
 class RouterAIProvider:
@@ -49,23 +48,18 @@ class RouterAIProvider:
         if json_mode:
             payload["response_format"] = {"type": "json_object"}
 
-        span_name = f"llm.{model.split('/')[-1]}"
-        if PHOENIX_AVAILABLE and pxtrace:
-            with pxtrace.open_llm_span(
-                span_name,
-                input={"messages": messages},
-                vendor="routerai",
-                metadata={"model": model, "temperature": temperature},
-            ) as span:
-                try:
-                    content = self._do_request(payload)
-                    span.output = {"content": content}
-                    return content
-                except Exception as e:
-                    span.record_exception(e)
-                    raise
-        else:
-            return self._do_request(payload)
+        with trace_llm(model, messages, temperature, max_tokens or 8192, json_mode) as span:
+            try:
+                content = self._do_request(payload)
+                set_span_output(span, content, mime_type="text/plain")
+                set_span_tokens(
+                    span,
+                    prompt_tokens=len(json.dumps({"messages": messages}, ensure_ascii=False)) // 4,
+                    completion_tokens=len(content) // 4,
+                )
+                return content
+            except Exception as e:
+                raise
 
     def _do_request(self, payload: dict[str, Any]) -> str:
         try:

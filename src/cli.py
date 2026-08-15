@@ -1,8 +1,12 @@
-import logging
+import os
 import sys
+import logging
 
 import click
-from rich.console import Console
+
+from src.tracing import init_phoenix
+
+phoenix_ok = init_phoenix(project_name="qa-review")
 
 from src.report import run_review
 
@@ -14,7 +18,6 @@ logging.basicConfig(
 )
 
 logger = logging.getLogger(__name__)
-console = Console(force_terminal=False)
 
 
 @click.command()

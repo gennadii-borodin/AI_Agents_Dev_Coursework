@@ -21,44 +21,54 @@ logger = logging.getLogger(__name__)
 
 
 def route_request(state: ReviewState, settings: Optional[Settings] = None) -> ReviewState:
+    from src.tracing import trace_agent, set_span_output
+
     if settings is None:
         settings = get_settings()
-    llm = RouterAIProvider(settings)
 
-    query = state.user_query.lower()
+    with trace_agent("Router", **{"agent.type": "router"}) as span:
+        llm = RouterAIProvider(settings)
 
-    requirement_ids = re.findall(r"REQ-\d+", query.upper())
+        query = state.user_query.lower()
 
-    scenario = "full_review"
-    if any(w in query for w in ["покрытие", "coverage", "req-"]):
-        if requirement_ids:
-            scenario = "requirement_coverage"
-        else:
-            scenario = "coverage_review"
-    elif any(w in query for w in ["дизайн", "design", "качество"]):
-        scenario = "design_review"
-    elif any(w in query for w in ["стандарт", "standard", "соответстви"]):
-        scenario = "standards_review"
-    elif any(w in query for w in ["без требован", "unlinked", "без req"]):
-        scenario = "find_unlinked_tests"
-    elif any(w in query for w in ["полное", "full", "всё", "комплексн"]):
+        requirement_ids = re.findall(r"REQ-\d+", query.upper())
+
         scenario = "full_review"
+        if any(w in query for w in ["покрытие", "coverage", "req-"]):
+            if requirement_ids:
+                scenario = "requirement_coverage"
+            else:
+                scenario = "coverage_review"
+        elif any(w in query for w in ["дизайн", "design", "качество"]):
+            scenario = "design_review"
+        elif any(w in query for w in ["стандарт", "standard", "соответстви"]):
+            scenario = "standards_review"
+        elif any(w in query for w in ["без требован", "unlinked", "без req"]):
+            scenario = "find_unlinked_tests"
+        elif any(w in query for w in ["полное", "full", "всё", "комплексн"]):
+            scenario = "full_review"
 
-    agents_map = {
-        "full_review": ["coverage", "design", "standards"],
-        "coverage_review": ["coverage"],
-        "design_review": ["design"],
-        "standards_review": ["standards"],
-        "requirement_coverage": ["coverage", "design"],
-        "find_unlinked_tests": [],
-    }
+        agents_map = {
+            "full_review": ["coverage", "design", "standards"],
+            "coverage_review": ["coverage"],
+            "design_review": ["design"],
+            "standards_review": ["standards"],
+            "requirement_coverage": ["coverage", "design"],
+            "find_unlinked_tests": [],
+        }
 
-    state.scenario = scenario
-    state.requirement_ids = requirement_ids if requirement_ids else None
-    state.agents_to_run = agents_map.get(scenario, ["coverage"])
+        state.scenario = scenario
+        state.requirement_ids = requirement_ids if requirement_ids else None
+        state.agents_to_run = agents_map.get(scenario, ["coverage"])
 
-    logger.info(f"Routed query to scenario={scenario}, agents={state.agents_to_run}")
-    return state
+        if span is not None:
+            span.set_attribute("router.scenario", scenario)
+            span.set_attribute("router.requirement_ids", ",".join(state.requirement_ids or []))
+            span.set_attribute("router.agents", ",".join(state.agents_to_run))
+            set_span_output(span, {"scenario": scenario}, mime_type="application/json")
+
+        logger.info(f"Routed query to scenario={scenario}, agents={state.agents_to_run}")
+        return state
 
 
 def run_coverage_node(state: ReviewState) -> ReviewState:

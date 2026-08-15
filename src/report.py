@@ -214,13 +214,46 @@ def run_review(user_query: str) -> ReviewState:
     settings = get_settings()
     graph = build_graph()
 
-    state = ReviewState(user_query=user_query)
-    state = graph.invoke(state)
+    from src.tracing import trace_run, set_span_output, get_current_session_id
+
+    scenario = "pending"
+    agents = []
+    with trace_run(user_query, "pending", []) as run_span:
+        state = ReviewState(user_query=user_query)
+        state = graph.invoke(state)
+
+        def _get(obj, attr, default=None):
+            if isinstance(obj, dict):
+                return obj.get(attr, default)
+            return getattr(obj, attr, default)
+
+        if run_span is not None:
+            scenario = _get(state, "scenario") or "unknown"
+            agents = _get(state, "agents_to_run") or []
+            run_span.set_attribute("qa.scenario", scenario)
+            run_span.set_attribute("qa.agents", ",".join(agents))
+            run_span.set_attribute("qa.requirement_ids", ",".join(_get(state, "requirement_ids") or []))
+            cov = _get(state, "coverage_report")
+            des = _get(state, "design_report")
+            std = _get(state, "standards_report")
+            if cov:
+                run_span.set_attribute("qa.coverage_pct", float(cov.total_coverage))
+            if des:
+                run_span.set_attribute("qa.design_score", float(des.overall_score))
+            if std:
+                run_span.set_attribute("qa.standards_compliance_pct", float(std.compliance_percentage))
+                run_span.set_attribute("qa.violations_count", len(std.violations))
+            set_span_output(run_span, {
+                "scenario": scenario,
+                "session_id": get_current_session_id(),
+                "agents": agents,
+            }, mime_type="application/json")
 
     saved = save_reports(state)
 
     print(f"\nOK: Отчёты сохранены в {REPORTS_DIR}")
     for name, path in saved.items():
         print(f"  - {name}: {path}")
+    print(f"  - session: {get_current_session_id()}")
 
     return state

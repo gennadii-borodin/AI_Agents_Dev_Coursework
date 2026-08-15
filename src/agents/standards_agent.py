@@ -131,24 +131,43 @@ def run_standards_agent(
     if llm is None:
         llm = RouterAIProvider(settings)
 
-    if test_cases is None:
-        tc_data = get_all_test_cases()
-        test_cases = [TestCase(**tc) for tc in tc_data]
+    from src.tracing import trace_agent, set_span_output
 
-    if requirement_ids:
-        req_set = set(requirement_ids)
-        test_cases = [tc for tc in test_cases if tc.req in req_set]
+    CHUNK_SIZE = 50
 
-    tc_dicts = _prepare_test_cases_data([tc.model_dump() for tc in test_cases])
+    with trace_agent(
+        "Standards Agent",
+        **{"agent.type": "standards"},
+    ) as span:
 
-    CHUNK_SIZE = 10
-    all_violations = []
+        if test_cases is None:
+            tc_data = get_all_test_cases()
+            test_cases = [TestCase(**tc) for tc in tc_data]
 
-    for i in range(0, len(tc_dicts), CHUNK_SIZE):
-        chunk = tc_dicts[i:i + CHUNK_SIZE]
-        logger.info(f"Analyzing standards chunk {i // CHUNK_SIZE + 1}/{(len(tc_dicts) + CHUNK_SIZE - 1) // CHUNK_SIZE}")
-        chunk_violations = _analyze_chunk(chunk, llm, settings)
-        all_violations.extend(chunk_violations)
+        if requirement_ids:
+            req_set = set(requirement_ids)
+            test_cases = [tc for tc in test_cases if tc.req in req_set]
+
+        tc_dicts = _prepare_test_cases_data([tc.model_dump() for tc in test_cases])
+
+        if span is not None:
+            span.set_attribute("test_cases.count", len(test_cases))
+            span.set_attribute("chunk_size", CHUNK_SIZE)
+
+        all_violations = []
+
+        for i in range(0, len(tc_dicts), CHUNK_SIZE):
+            chunk = tc_dicts[i:i + CHUNK_SIZE]
+            logger.info(f"Analyzing standards chunk {i // CHUNK_SIZE + 1}/{(len(tc_dicts) + CHUNK_SIZE - 1) // CHUNK_SIZE}")
+            chunk_violations = _analyze_chunk(chunk, llm, settings)
+            all_violations.extend(chunk_violations)
+
+        if span is not None:
+            span.set_attribute("chunks.total", (len(tc_dicts) + CHUNK_SIZE - 1) // CHUNK_SIZE)
+            span.set_attribute("violations.total", len(all_violations))
+            set_span_output(span, {"compliance_percentage": round(
+                (len(test_cases) * 9 - len(all_violations)) / (len(test_cases) * 9) * 100
+                if test_cases else 100.0, 1)}, mime_type="application/json")
 
     total_checks = len(test_cases) * 9
     passed_checks = total_checks - len(all_violations)

@@ -92,25 +92,36 @@ def run_design_agent(
     if llm is None:
         llm = RouterAIProvider(settings)
 
-    if requirements is None:
-        req_data = get_requirements_by_ids(requirement_ids) if requirement_ids else get_all_requirements()
-        requirements = [Requirement(**r) for r in req_data]
+    from src.tracing import trace_agent, set_span_output
 
-    if test_cases is None:
-        tc_data = get_all_test_cases()
-        test_cases = [TestCase(**tc) for tc in tc_data]
+    with trace_agent(
+        "Design Agent",
+        **{"agent.type": "design"},
+    ) as span:
 
-    if requirement_ids:
-        req_set = set(requirement_ids)
-        test_cases = [tc for tc in test_cases if tc.req in req_set]
+        if requirements is None:
+            req_data = get_requirements_by_ids(requirement_ids) if requirement_ids else get_all_requirements()
+            requirements = [Requirement(**r) for r in req_data]
 
-    req_data = _prepare_requirements_data([r.model_dump() for r in requirements])
-    tc_data = _prepare_test_cases_data([tc.model_dump() for tc in test_cases])
+        if test_cases is None:
+            tc_data = get_all_test_cases()
+            test_cases = [TestCase(**tc) for tc in tc_data]
 
-    req_json = json.dumps(req_data, ensure_ascii=False)
-    tc_json = json.dumps(tc_data, ensure_ascii=False)
+        if requirement_ids:
+            req_set = set(requirement_ids)
+            test_cases = [tc for tc in test_cases if tc.req in req_set]
 
-    user_message = f"""Оцени качество тест-дизайна.
+        if span is not None:
+            span.set_attribute("requirements.count", len(requirements))
+            span.set_attribute("test_cases.count", len(test_cases))
+
+        req_data = _prepare_requirements_data([r.model_dump() for r in requirements])
+        tc_data = _prepare_test_cases_data([tc.model_dump() for tc in test_cases])
+
+        req_json = json.dumps(req_data, ensure_ascii=False)
+        tc_json = json.dumps(tc_data, ensure_ascii=False)
+
+        user_message = f"""Оцени качество тест-дизайна.
 
 ## Требования ({len(req_data)}):
 {req_json}
@@ -120,32 +131,45 @@ def run_design_agent(
 
 Верни отчёт о качестве тест-дизайна в формате JSON."""
 
-    logger.info("Calling LLM for design analysis...")
-    response = llm.chat_completion(
-        messages=[
-            {"role": "system", "content": DESIGN_SYSTEM_PROMPT},
-            {"role": "user", "content": user_message},
-        ],
-        model=settings.model_senior,
-        temperature=0.1,
-        json_mode=True,
-    )
+        logger.info("Calling LLM for design analysis...")
 
-    try:
-        data = json.loads(response)
-        return DesignReport(**data)
-    except json.JSONDecodeError as e:
-        logger.warning(f"JSON parse error, attempting repair: {e}")
+        response = llm.chat_completion(
+            messages=[
+                {"role": "system", "content": DESIGN_SYSTEM_PROMPT},
+                {"role": "user", "content": user_message},
+            ],
+            model=settings.model_senior,
+            temperature=0.1,
+            json_mode=True,
+        )
+
+        if span is not None:
+            span.set_attribute("llm.response.length", len(response) if response else 0)
+
         try:
-            repaired = json_repair.repair_json(response, return_objects=True)
-            if isinstance(repaired, str):
-                data = json.loads(repaired)
-            elif isinstance(repaired, dict):
-                data = repaired
-            else:
-                raise ValueError(f"Unexpected type: {type(repaired)}")
+            data = json.loads(response)
+            # Clean up test_scores if malformed
+            if "test_scores" in data:
+                cleaned_scores = []
+                for ts in data["test_scores"]:
+                    if isinstance(ts, dict) and "test_case_id" in ts:
+                        cleaned_scores.append(ts)
+                data["test_scores"] = cleaned_scores
+            set_span_output(span, {"overall_score": data.get("overall_score")}, mime_type="application/json")
             return DesignReport(**data)
-        except Exception as e2:
-            logger.error(f"Failed to repair JSON: {e2}")
-            logger.error(f"Raw response: {response[:500]}")
-            raise
+        except json.JSONDecodeError as e:
+            logger.warning(f"JSON parse error, attempting repair: {e}")
+            try:
+                repaired = json_repair.repair_json(response, return_objects=True)
+                if isinstance(repaired, str):
+                    data = json.loads(repaired)
+                elif isinstance(repaired, dict):
+                    data = repaired
+                else:
+                    raise ValueError(f"Unexpected type: {type(repaired)}")
+                set_span_output(span, {"overall_score": data.get("overall_score")}, mime_type="application/json")
+                return DesignReport(**data)
+            except Exception as e2:
+                logger.error(f"Failed to repair JSON: {e2}")
+                logger.error(f"Raw response: {response[:500]}")
+                raise

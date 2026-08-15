@@ -5,6 +5,7 @@ import httpx
 from tenacity import retry, stop_after_attempt, wait_exponential
 
 from src.config import Settings, get_settings
+from src.tracing import trace_embedding, set_span_output
 
 logger = logging.getLogger(__name__)
 
@@ -31,16 +32,18 @@ class EmbeddingProvider:
         }
 
         try:
-            with httpx.Client(timeout=30) as client:
-                response = client.post(
-                    f"{self.base_url}/embeddings",
-                    headers=self.headers,
-                    json=payload,
-                )
-                response.raise_for_status()
-                data = response.json()
-                embedding = data["data"][0]["embedding"]
-                return embedding
+            with trace_embedding(model, text) as span:
+                with httpx.Client(timeout=30) as client:
+                    response = client.post(
+                        f"{self.base_url}/embeddings",
+                        headers=self.headers,
+                        json=payload,
+                    )
+                    response.raise_for_status()
+                    data = response.json()
+                    embedding = data["data"][0]["embedding"]
+                    set_span_output(span, {"dimensions": len(embedding)}, mime_type="application/json")
+                    return embedding
         except Exception as e:
             logger.error(f"Embedding request failed: {e}")
             raise

@@ -119,6 +119,45 @@ qa-review-agent/
 pytest tests/integration -v
 ```
 
+## Трассировка (Arize Phoenix)
+
+Каждый запуск ревью автоматически пишет трейсы в Phoenix (OTLP/gRPC, порт `4317`).
+Phoenix поднят в Docker Compose (`localhost:6006`).
+
+**Что попадает в трейсы:**
+
+- **Сессия на прогон** — уникальный `session.id` (`qa-review-xxxxxxxxxx`) на каждый вызов `run_review`. Все спаны одного прогона собраны в одну сессию/трейс.
+- **Вложенность спанов:**
+
+  ```
+  QA Review Run (AGENT, session.id)
+  ├─ Router                         [AGENT]
+  ├─ Coverage Agent   [AGENT]
+  │  ├─ LLM deepseek-v4-pro-0813    [LLM]   (модель, температура, токены, ввод/вывод)
+  │  ├─ Retrieve test_cases         [RETRIEVER]  (top_k, найденные документы + similarity)
+  │  │  └─ Embedding text-embedding-3-small  [EMBEDDING]  (модель, входной текст)
+  │  └─ Tool execute_sql            [TOOL]  (SQL, row_count)
+  ├─ Design Agent     [AGENT] → LLM + SQL
+  └─ Standards Agent  [AGENT] → LLM + SQL
+  ```
+
+- **Полезные атрибуты:** `qa.scenario`, `qa.requirement_ids`, `qa.agents`, счётчики
+  (`requirements.count`, `violations.total`), оценки (`qa.coverage_pct`, `qa.design_score`,
+  `qa.standards_compliance_pct`), `duration_ms` на каждом спане, оценки токенов.
+
+**Просмотр:** откройте http://localhost:6006 → список сессий, по одной на каждый запуск.
+
+**Проверка доступности (вне приложения):**
+
+```bash
+python test_phoenix_connectivity.py
+```
+
+**Эмбеддинги:** генерируются при миграции (`migrations.load_data`). Если данные уже
+загружены, но `embedding IS NULL`, миграция дозаполнит их автоматически. RAG-поиск
+использует `1 - (embedding <=> query)` (pgvector 0.8).
+
 ## Лицензия
 
 MIT
+

@@ -5,6 +5,7 @@ import psycopg
 from psycopg.rows import dict_row
 
 from src.config import Settings, get_settings
+from src.tracing import trace_tool, set_span_output
 
 logger = logging.getLogger(__name__)
 
@@ -25,18 +26,23 @@ def execute_sql(query: str, params: Optional[list] = None, settings: Optional[Se
             return {"results": [], "row_count": 0, "error": f"Forbidden keyword: {keyword}"}
 
     try:
-        with get_connection() as conn:
-            with conn.cursor() as cur:
-                if params:
-                    cur.execute(query, params)
-                else:
-                    cur.execute(query)
-                rows = cur.fetchall()
-                return {
-                    "results": [dict(row) for row in rows],
-                    "row_count": len(rows),
-                    "error": None,
-                }
+        with trace_tool("execute_sql", {"query": query, "params": params}) as span:
+            with get_connection() as conn:
+                with conn.cursor() as cur:
+                    if params:
+                        cur.execute(query, params)
+                    else:
+                        cur.execute(query)
+                    rows = cur.fetchall()
+                    result = {
+                        "results": [dict(row) for row in rows],
+                        "row_count": len(rows),
+                        "error": None,
+                    }
+                    if span is not None:
+                        span.set_attribute("sql.row_count", len(rows))
+                    set_span_output(span, {"row_count": len(rows)})
+                    return result
     except Exception as e:
         logger.error(f"SQL query failed: {e}")
         return {"results": [], "row_count": 0, "error": str(e)}
