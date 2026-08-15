@@ -73,6 +73,20 @@ def get_test_cases_by_req(requirement_id: str) -> list[dict[str, Any]]:
     return result["results"] if result["error"] is None else []
 
 
+def get_test_cases_by_reqs(requirement_ids: list[str]) -> list[dict[str, Any]]:
+    """Фильтрованная выборка — ровно те кейсы, что относятся к запрошенным REQ.
+
+    Заменяет SELECT * FROM test_cases для целевых запросов (избегаем
+    лишних сканирований всей таблицы в каждом агенте).
+    """
+    if not requirement_ids:
+        return []
+    placeholders = ",".join(["%s"] * len(requirement_ids))
+    query = f"SELECT * FROM test_cases WHERE req IN ({placeholders}) ORDER BY test_case_id"
+    result = execute_sql(query, list(requirement_ids))
+    return result["results"] if result["error"] is None else []
+
+
 def get_tests_without_requirements() -> list[dict[str, Any]]:
     query = "SELECT * FROM test_cases WHERE req IS NULL OR req = '' ORDER BY test_case_id"
     result = execute_sql(query)

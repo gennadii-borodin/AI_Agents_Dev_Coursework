@@ -20,6 +20,15 @@ class Settings(BaseSettings):
     llm_timeout_seconds: int = 60
     max_output_tokens: int = 4096
 
+    # Стоимость токенов (USD за 1M) по моделям. Переопределяется через
+    # MODEL_PRICING в .env. Значения по умолчанию — публичные цены DeepSeek V3;
+    # замените на актуальные цены RouterAI.
+    model_pricing: dict = {
+        "deepseek/deepseek-v4-pro-0813": {"input": 0.27, "output": 1.10},
+        "deepseek/deepseek-v4-flash-0731": {"input": 0.10, "output": 0.40},
+        "openai/text-embedding-3-small": {"input": 0.02, "output": 0.0},
+    }
+
     class Config:
         env_file = ".env"
         env_file_encoding = "utf-8"

@@ -40,6 +40,17 @@ _TRACER = None
 _CURRENT_SESSION_ID: Optional[str] = None
 _PHOENIX_INITIALIZED = False
 
+_RUN_STATS: dict = {"llm_calls": 0, "prompt_tokens": 0, "completion_tokens": 0, "by_model": {}}
+
+
+def _reset_run_stats():
+    global _RUN_STATS
+    _RUN_STATS = {"llm_calls": 0, "prompt_tokens": 0, "completion_tokens": 0, "by_model": {}}
+
+
+def get_run_stats() -> dict:
+    return dict(_RUN_STATS)
+
 
 def _resolve_phoenix_endpoint() -> str:
     """Определяем доступный gRPC endpoint для Phoenix."""
@@ -188,6 +199,7 @@ def trace_run(query: str, scenario: str, agents: list[str], session_id: Optional
             "qa.agents": ",".join(agents),
         },
     ) as span:
+        _reset_run_stats()
         try:
             yield span
         finally:
@@ -232,6 +244,10 @@ def trace_llm(
             SpanAttributes.LLM_MODEL_NAME: model,
             SpanAttributes.LLM_PROVIDER: "routerai",
             SpanAttributes.LLM_INVOCATION_PARAMETERS: _json(invocation),
+            SpanAttributes.LLM_INPUT_MESSAGES: _json([
+                {"message": {"role": m.get("role"), "content": (m.get("content") or "")[:4000]}}
+                for m in messages
+            ]),
             SpanAttributes.INPUT_VALUE: _json(input_value),
             SpanAttributes.INPUT_MIME_TYPE: "application/json",
         },
@@ -299,14 +315,34 @@ def set_span_output(span, output: Any, mime_type: str = "text/plain"):
         pass
 
 
-def set_span_tokens(span, prompt_tokens: int, completion_tokens: int):
+def set_span_tokens(span, prompt_tokens: int, completion_tokens: int, model: Optional[str] = None):
+    global _RUN_STATS
     if span is None:
         return
+    _RUN_STATS["llm_calls"] += 1
+    _RUN_STATS["prompt_tokens"] += prompt_tokens
+    _RUN_STATS["completion_tokens"] += completion_tokens
+    if model:
+        d = _RUN_STATS["by_model"].setdefault(model, {"prompt": 0, "completion": 0})
+        d["prompt"] += prompt_tokens
+        d["completion"] += completion_tokens
     try:
         span.set_attribute(SpanAttributes.LLM_TOKEN_COUNT_PROMPT, prompt_tokens)
         span.set_attribute(SpanAttributes.LLM_TOKEN_COUNT_COMPLETION, completion_tokens)
         span.set_attribute(
             SpanAttributes.LLM_TOKEN_COUNT_TOTAL, prompt_tokens + completion_tokens
+        )
+    except Exception:
+        pass
+
+
+def set_llm_output(span, content: str):
+    if span is None:
+        return
+    try:
+        span.set_attribute(
+            SpanAttributes.LLM_OUTPUT_MESSAGES,
+            _json([{"message": {"role": "assistant", "content": str(content)[:4000]}}]),
         )
     except Exception:
         pass

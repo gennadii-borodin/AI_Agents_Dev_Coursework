@@ -8,7 +8,8 @@ import json_repair
 from src.config import Settings, get_settings
 from src.llm_provider import RouterAIProvider
 from src.models import StandardsReport, TestCase
-from src.tools.sql_tool import get_all_test_cases
+from src.tools.sql_tool import get_all_test_cases, get_test_cases_by_reqs
+from src.tracing import OTEL_AVAILABLE, otel_trace as _otel_trace
 
 logger = logging.getLogger(__name__)
 
@@ -92,6 +93,10 @@ def _parse_llm_response(response: str) -> dict:
             else:
                 raise ValueError(f"Unexpected type: {type(repaired)}")
         except Exception:
+            if OTEL_AVAILABLE and _otel_trace is not None:
+                s = _otel_trace.get_current_span()
+                if s is not None and s.is_recording():
+                    s.add_event("json_repaired", {"agent": "standards", "tool": "json_repair"})
             fixed = _fix_json(response)
             return json.loads(fixed)
 
@@ -141,7 +146,7 @@ def run_standards_agent(
     ) as span:
 
         if test_cases is None:
-            tc_data = get_all_test_cases()
+            tc_data = get_test_cases_by_reqs(requirement_ids) if requirement_ids else get_all_test_cases()
             test_cases = [TestCase(**tc) for tc in tc_data]
 
         if requirement_ids:

@@ -10,10 +10,29 @@ from src.tracing import (
     trace_llm,
     set_span_output,
     set_span_tokens,
+    set_llm_output,
     OTEL_AVAILABLE,
+    otel_trace as _otel_trace,
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _on_retry(retry_state):
+    """Добавляет событие повтора на текущий спан LLM (видно в трейсе)."""
+    if not OTEL_AVAILABLE or _otel_trace is None:
+        return
+    span = _otel_trace.get_current_span()
+    if span is None or not span.is_recording():
+        return
+    exc = retry_state.outcome.exception() if retry_state.outcome else None
+    span.add_event(
+        "llm_retry",
+        {
+            "attempt": retry_state.attempt_number,
+            "error": str(exc) if exc else "",
+        },
+    )
 
 
 class RouterAIProvider:
@@ -29,6 +48,7 @@ class RouterAIProvider:
         stop=stop_after_attempt(3),
         wait=wait_exponential(multiplier=1, min=2, max=10),
         reraise=True,
+        before_sleep=_on_retry,
     )
     def chat_completion(
         self,
@@ -50,18 +70,28 @@ class RouterAIProvider:
 
         with trace_llm(model, messages, temperature, max_tokens or 8192, json_mode) as span:
             try:
-                content = self._do_request(payload)
+                content, usage = self._do_request(payload)
                 set_span_output(span, content, mime_type="text/plain")
-                set_span_tokens(
-                    span,
-                    prompt_tokens=len(json.dumps({"messages": messages}, ensure_ascii=False)) // 4,
-                    completion_tokens=len(content) // 4,
-                )
+                set_llm_output(span, content)
+                if usage:
+                    set_span_tokens(
+                        span,
+                        prompt_tokens=int(usage.get("prompt_tokens") or 0),
+                        completion_tokens=int(usage.get("completion_tokens") or 0),
+                        model=model,
+                    )
+                else:
+                    set_span_tokens(
+                        span,
+                        prompt_tokens=len(json.dumps({"messages": messages}, ensure_ascii=False)) // 4,
+                        completion_tokens=len(content) // 4,
+                        model=model,
+                    )
                 return content
             except Exception as e:
                 raise
 
-    def _do_request(self, payload: dict[str, Any]) -> str:
+    def _do_request(self, payload: dict[str, Any]) -> tuple[str, dict]:
         try:
             with httpx.Client(timeout=self.settings.llm_timeout_seconds) as client:
                 response = client.post(
@@ -72,7 +102,8 @@ class RouterAIProvider:
                 response.raise_for_status()
                 data = response.json()
                 content = data["choices"][0]["message"]["content"]
-                return content.strip()
+                usage = data.get("usage", {}) or {}
+                return content.strip(), usage
         except Exception as e:
             logger.error(f"LLM request failed: {e}")
             raise

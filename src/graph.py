@@ -53,7 +53,7 @@ def route_request(state: ReviewState, settings: Optional[Settings] = None) -> Re
             "coverage_review": ["coverage"],
             "design_review": ["design"],
             "standards_review": ["standards"],
-            "requirement_coverage": ["coverage", "design"],
+            "requirement_coverage": ["coverage", "design", "standards"],
             "find_unlinked_tests": [],
         }
 
@@ -71,9 +71,19 @@ def route_request(state: ReviewState, settings: Optional[Settings] = None) -> Re
         return state
 
 
+def _route_next(state: ReviewState) -> str:
+    """Передаёт управление следующему агенту из agents_to_run (в каноническом порядке)."""
+    plan = [a for a in ("coverage", "design", "standards") if a in (state.agents_to_run or [])]
+    current = state.current_step
+    if current not in plan:
+        return END
+    idx = plan.index(current)
+    return plan[idx + 1] if idx + 1 < len(plan) else END
+
+
 def run_coverage_node(state: ReviewState) -> ReviewState:
     logger.info("Running Coverage Agent")
-    state.current_step = "coverage_analysis"
+    state.current_step = "coverage"
     report = run_coverage_agent(
         requirement_ids=state.requirement_ids,
     )
@@ -83,7 +93,7 @@ def run_coverage_node(state: ReviewState) -> ReviewState:
 
 def run_design_node(state: ReviewState) -> ReviewState:
     logger.info("Running Design Agent")
-    state.current_step = "design_analysis"
+    state.current_step = "design"
     report = run_design_agent(
         requirement_ids=state.requirement_ids,
     )
@@ -93,7 +103,7 @@ def run_design_node(state: ReviewState) -> ReviewState:
 
 def run_standards_node(state: ReviewState) -> ReviewState:
     logger.info("Running Standards Agent")
-    state.current_step = "standards_analysis"
+    state.current_step = "standards"
     report = run_standards_agent(
         requirement_ids=state.requirement_ids,
     )
@@ -133,9 +143,17 @@ def build_graph() -> StateGraph:
         },
     )
 
-    workflow.add_edge("coverage", "design")
-    workflow.add_edge("design", "standards")
-    workflow.add_edge("standards", END)
+    # Агенты в цепочке определяются state.agents_to_run (а не жёстко заданы),
+    # поэтому трасса соответствует metadata qa.agents и не запускает лишних агентов.
+    agent_targets = {
+        "coverage": "coverage",
+        "design": "design",
+        "standards": "standards",
+        END: END,
+    }
+    workflow.add_conditional_edges("coverage", _route_next, agent_targets)
+    workflow.add_conditional_edges("design", _route_next, agent_targets)
+    workflow.add_conditional_edges("standards", _route_next, agent_targets)
     workflow.add_edge("find_unlinked", END)
 
     return workflow.compile()

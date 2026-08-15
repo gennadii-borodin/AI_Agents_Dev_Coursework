@@ -174,7 +174,7 @@ class TestGraphRouting:
             ("оценить дизайн тестов", "design_review", ["design"]),
             ("проверить соответствие стандартам", "standards_review", ["standards"]),
             ("найти тесты без требований", "find_unlinked_tests", []),
-            ("проверить покрытие REQ-001", "requirement_coverage", ["coverage", "design"]),
+            ("проверить покрытие REQ-001", "requirement_coverage", ["coverage", "design", "standards"]),
         ]
 
         for query, expected_scenario, expected_agents in test_cases:

@@ -13,6 +13,7 @@ from src.tools.sql_tool import (
     get_all_requirements,
     get_all_test_cases,
     get_requirements_by_ids,
+    get_test_cases_by_reqs,
     get_tests_without_requirements,
 )
 
@@ -109,7 +110,7 @@ def run_coverage_agent(
             requirements = [Requirement(**r) for r in req_data]
 
         if test_cases is None:
-            tc_data = get_all_test_cases()
+            tc_data = get_test_cases_by_reqs(requirement_ids) if requirement_ids else get_all_test_cases()
             test_cases = [TestCase(**tc) for tc in tc_data]
 
         if requirement_ids:
@@ -189,6 +190,8 @@ def run_coverage_agent(
             set_span_output(span, {"total_coverage": data.get("total_coverage")}, mime_type="application/json")
             return CoverageReport(**data)
         except json.JSONDecodeError:
+            if span is not None:
+                span.add_event("json_repaired", {"agent": "coverage", "tool": "json_repair"})
             try:
                 repaired = json_repair.repair_json(response, return_objects=True)
                 if isinstance(repaired, str):

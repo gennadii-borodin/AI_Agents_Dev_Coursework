@@ -8,7 +8,7 @@ import json_repair
 from src.config import Settings, get_settings
 from src.llm_provider import RouterAIProvider
 from src.models import DesignReport, Requirement, TestCase
-from src.tools.sql_tool import get_all_requirements, get_all_test_cases, get_requirements_by_ids
+from src.tools.sql_tool import get_all_requirements, get_all_test_cases, get_requirements_by_ids, get_test_cases_by_reqs
 
 logger = logging.getLogger(__name__)
 
@@ -104,7 +104,7 @@ def run_design_agent(
             requirements = [Requirement(**r) for r in req_data]
 
         if test_cases is None:
-            tc_data = get_all_test_cases()
+            tc_data = get_test_cases_by_reqs(requirement_ids) if requirement_ids else get_all_test_cases()
             test_cases = [TestCase(**tc) for tc in tc_data]
 
         if requirement_ids:
@@ -159,6 +159,8 @@ def run_design_agent(
             return DesignReport(**data)
         except json.JSONDecodeError as e:
             logger.warning(f"JSON parse error, attempting repair: {e}")
+            if span is not None:
+                span.add_event("json_repaired", {"agent": "design", "tool": "json_repair"})
             try:
                 repaired = json_repair.repair_json(response, return_objects=True)
                 if isinstance(repaired, str):

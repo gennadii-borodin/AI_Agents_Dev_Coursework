@@ -9,6 +9,13 @@ from src.agents.standards_agent import run_standards_agent
 from src.config import get_settings
 from src.graph import build_graph
 from src.models import ReviewState
+from src.tracing import (
+    trace_run,
+    trace_tool,
+    set_span_output,
+    get_current_session_id,
+    get_run_stats,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -185,27 +192,40 @@ def generate_summary_markdown(state: ReviewState) -> str:
 def save_reports(state: ReviewState) -> dict[str, Path]:
     if isinstance(state, dict):
         state = ReviewState(**state)
-    saved = {}
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    with trace_tool(
+        "save_reports",
+        {
+            "has_coverage": state.coverage_report is not None,
+            "has_design": state.design_report is not None,
+            "has_standards": state.standards_report is not None,
+        },
+        tool_type="CHAIN",
+    ) as span:
+        saved = {}
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 
-    if state.coverage_report:
-        path = REPORTS_DIR / f"report_coverage_{timestamp}.md"
-        path.write_text(generate_coverage_markdown(state.coverage_report), encoding="utf-8")
-        saved["coverage"] = path
+        if state.coverage_report:
+            path = REPORTS_DIR / f"report_coverage_{timestamp}.md"
+            path.write_text(generate_coverage_markdown(state.coverage_report), encoding="utf-8")
+            saved["coverage"] = path
 
-    if state.design_report:
-        path = REPORTS_DIR / f"report_design_{timestamp}.md"
-        path.write_text(generate_design_markdown(state.design_report), encoding="utf-8")
-        saved["design"] = path
+        if state.design_report:
+            path = REPORTS_DIR / f"report_design_{timestamp}.md"
+            path.write_text(generate_design_markdown(state.design_report), encoding="utf-8")
+            saved["design"] = path
 
-    if state.standards_report:
-        path = REPORTS_DIR / f"report_standards_{timestamp}.md"
-        path.write_text(generate_standards_markdown(state.standards_report), encoding="utf-8")
-        saved["standards"] = path
+        if state.standards_report:
+            path = REPORTS_DIR / f"report_standards_{timestamp}.md"
+            path.write_text(generate_standards_markdown(state.standards_report), encoding="utf-8")
+            saved["standards"] = path
 
-    summary_path = REPORTS_DIR / f"report_summary_{timestamp}.md"
-    summary_path.write_text(generate_summary_markdown(state), encoding="utf-8")
-    saved["summary"] = summary_path
+        summary_path = REPORTS_DIR / f"report_summary_{timestamp}.md"
+        summary_path.write_text(generate_summary_markdown(state), encoding="utf-8")
+        saved["summary"] = summary_path
+
+        if span is not None:
+            span.set_attribute("reports.saved", ",".join(saved.keys()))
+            set_span_output(span, {"saved": list(saved.keys())}, mime_type="application/json")
 
     return saved
 
@@ -213,8 +233,6 @@ def save_reports(state: ReviewState) -> dict[str, Path]:
 def run_review(user_query: str) -> ReviewState:
     settings = get_settings()
     graph = build_graph()
-
-    from src.tracing import trace_run, set_span_output, get_current_session_id
 
     scenario = "pending"
     agents = []
@@ -243,13 +261,31 @@ def run_review(user_query: str) -> ReviewState:
             if std:
                 run_span.set_attribute("qa.standards_compliance_pct", float(std.compliance_percentage))
                 run_span.set_attribute("qa.violations_count", len(std.violations))
+
+            stats = get_run_stats()
+            run_span.set_attribute("qa.llm_calls", stats["llm_calls"])
+            run_span.set_attribute("qa.prompt_tokens", stats["prompt_tokens"])
+            run_span.set_attribute("qa.completion_tokens", stats["completion_tokens"])
+            run_span.set_attribute("qa.total_tokens", stats["prompt_tokens"] + stats["completion_tokens"])
+            pricing = settings.model_pricing
+            est_cost = 0.0
+            for model, toks in stats.get("by_model", {}).items():
+                price = pricing.get(model, {})
+                est_cost += (
+                    toks["prompt"] / 1_000_000 * price.get("input", 0)
+                    + toks["completion"] / 1_000_000 * price.get("output", 0)
+                )
+            run_span.set_attribute("qa.estimated_cost_usd", round(est_cost, 4))
+
             set_span_output(run_span, {
                 "scenario": scenario,
                 "session_id": get_current_session_id(),
                 "agents": agents,
             }, mime_type="application/json")
 
-    saved = save_reports(state)
+        saved = save_reports(state)
+        if run_span is not None:
+            run_span.set_attribute("qa.reports_saved", ",".join(saved.keys()))
 
     print(f"\nOK: Отчёты сохранены в {REPORTS_DIR}")
     for name, path in saved.items():
