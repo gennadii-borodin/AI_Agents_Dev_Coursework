@@ -185,6 +185,37 @@ def generate_summary_markdown(state: ReviewState) -> str:
         lines.append(f"- **Блокирующих:** {len(sr.blocking_violations)}")
         lines.append("")
 
+    unlinked = (state.sql_results or {}).get("unlinked_tests")
+    if unlinked:
+        lines.append("## Тесты без привязки к требованиям\n")
+        lines.append(f"- **Всего:** {len(unlinked)}")
+        for tc in unlinked:
+            tc_id = tc.get("test_case_id", "?") if isinstance(tc, dict) else str(tc)
+            lines.append(f"  - `{tc_id}`")
+        lines.append("")
+
+    return "\n".join(lines)
+
+
+def generate_unlinked_tests_markdown(unlinked: list) -> str:
+    lines = ["# Тесты без привязки к требованиям\n"]
+    lines.append(f"**Всего тестов без требования:** {len(unlinked)}\n")
+
+    if not unlinked:
+        lines.append("_Нет тестов без привязки к требованиям._\n")
+        return "\n".join(lines)
+
+    lines.append("| Test Case | Title |")
+    lines.append("|-----------|-------|")
+    for tc in unlinked:
+        if isinstance(tc, dict):
+            tc_id = tc.get("test_case_id", "?")
+            title = tc.get("title", "")
+        else:
+            tc_id = str(tc)
+            title = ""
+        lines.append(f"| `{tc_id}` | {title} |")
+    lines.append("")
     return "\n".join(lines)
 
 
@@ -217,6 +248,12 @@ def save_reports(state: ReviewState) -> dict[str, Path]:
             path = REPORTS_DIR / f"report_standards_{timestamp}.md"
             path.write_text(generate_standards_markdown(state.standards_report), encoding="utf-8")
             saved["standards"] = path
+
+        unlinked = (state.sql_results or {}).get("unlinked_tests")
+        if unlinked:
+            path = REPORTS_DIR / f"report_unlinked_tests_{timestamp}.md"
+            path.write_text(generate_unlinked_tests_markdown(unlinked), encoding="utf-8")
+            saved["unlinked_tests"] = path
 
         summary_path = REPORTS_DIR / f"report_summary_{timestamp}.md"
         summary_path.write_text(generate_summary_markdown(state), encoding="utf-8")
