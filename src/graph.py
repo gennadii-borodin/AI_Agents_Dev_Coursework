@@ -47,7 +47,7 @@ def _llm_route(query: str, llm: RouterAIProvider, settings: Settings) -> tuple[s
             {"role": "user", "content": user},
         ],
         model=settings.model_junior,
-        temperature=0.0,
+        temperature=settings.llm_temperature,
         json_mode=True,
     )
     data = json.loads(response)

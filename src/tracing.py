@@ -52,9 +52,14 @@ def get_run_stats() -> dict:
     return dict(_RUN_STATS)
 
 
-def _resolve_phoenix_endpoint() -> str:
-    """Определяем доступный gRPC endpoint для Phoenix."""
-    grpc_port = int(os.getenv("PHOENIX_GRPC_PORT", "4317"))
+def _resolve_phoenix_endpoint(override: Optional[str] = None, grpc_port: int = 4317) -> str:
+    """Определяем доступный gRPC endpoint для Phoenix.
+
+    Если задан ``override`` (из настроек ``phoenix_grpc_endpoint``), возвращаем
+    его как есть. Иначе пробуем авто-обнаружить доступный хост на ``grpc_port``.
+    """
+    if override:
+        return override
 
     hosts_to_try = ["host.docker.internal", "localhost", "127.0.0.1"]
 
@@ -85,7 +90,18 @@ def init_phoenix(project_name: Optional[str] = None) -> bool:
     if _PHOENIX_INITIALIZED:
         return _PROVIDER is not None
 
-    endpoint = _resolve_phoenix_endpoint()
+    endpoint_override: Optional[str] = None
+    grpc_port = int(os.getenv("PHOENIX_GRPC_PORT", "4317"))
+    try:
+        from src.config import get_settings
+
+        _settings = get_settings()
+        endpoint_override = _settings.phoenix_grpc_endpoint
+        grpc_port = _settings.phoenix_grpc_port
+    except Exception:
+        pass
+
+    endpoint = _resolve_phoenix_endpoint(endpoint_override, grpc_port)
     if not endpoint:
         logger.debug("Phoenix endpoint not reachable, tracing disabled")
         _PHOENIX_INITIALIZED = True

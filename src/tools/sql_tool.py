@@ -38,8 +38,8 @@ def execute_sql(query: str, params: Optional[list] = None, settings: Optional[Se
                         cur.execute(query)
                     rows = cur.fetchall()
                     # Ограничение из скилла sql_query.yaml: максимум 1000 строк.
-                    truncated = len(rows) > MAX_SQL_ROWS
-                    rows = rows[:MAX_SQL_ROWS]
+                    truncated = len(rows) > settings.sql_max_rows
+                    rows = rows[: settings.sql_max_rows]
                     result = {
                         "results": [dict(row) for row in rows],
                         "row_count": len(rows),

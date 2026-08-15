@@ -31,7 +31,6 @@ from tests.integration.helpers import (  # noqa: E402
 def _env(monkeypatch):
     """Дамми-окружение + сброс кэша Settings (без обращений к сети/БД)."""
     monkeypatch.setenv("ROUTER_AI_API_KEY", "test-router-key")
-    monkeypatch.setenv("OPENAI_API_KEY", "test-openai-key")
     monkeypatch.setenv("DATABASE_URL", "postgresql://test:test@localhost:5432/test")
     get_settings.cache_clear()
 

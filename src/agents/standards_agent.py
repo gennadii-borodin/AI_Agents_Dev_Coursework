@@ -111,7 +111,6 @@ def _analyze_chunk(chunk_data: list[dict], llm: RouterAIProvider, settings: Sett
             {"role": "user", "content": user_msg},
         ],
         model=settings.model_senior,
-        temperature=0.1,
         response_format={
             "type": "json_schema",
             "json_schema": {
@@ -143,7 +142,7 @@ def run_standards_agent(
 
     from src.tracing import set_span_output, trace_agent
 
-    CHUNK_SIZE = 50
+    chunk_size = settings.agents_chunk_size
 
     with trace_agent(
         "Standards Agent",
@@ -165,19 +164,19 @@ def run_standards_agent(
 
         if span is not None:
             span.set_attribute("test_cases.count", len(test_cases))
-            span.set_attribute("chunk_size", CHUNK_SIZE)
+            span.set_attribute("chunk_size", chunk_size)
 
         all_violations = []
 
-        for i in range(0, len(tc_dicts), CHUNK_SIZE):
-            chunk = tc_dicts[i:i + CHUNK_SIZE]
-            chunk_total = (len(tc_dicts) + CHUNK_SIZE - 1) // CHUNK_SIZE
-            logger.info(f"Analyzing standards chunk {i // CHUNK_SIZE + 1}/{chunk_total}")
+        for i in range(0, len(tc_dicts), chunk_size):
+            chunk = tc_dicts[i:i + chunk_size]
+            chunk_total = (len(tc_dicts) + chunk_size - 1) // chunk_size
+            logger.info(f"Analyzing standards chunk {i // chunk_size + 1}/{chunk_total}")
             chunk_violations = _analyze_chunk(chunk, llm, settings)
             all_violations.extend(chunk_violations)
 
         if span is not None:
-            span.set_attribute("chunks.total", (len(tc_dicts) + CHUNK_SIZE - 1) // CHUNK_SIZE)
+            span.set_attribute("chunks.total", (len(tc_dicts) + chunk_size - 1) // chunk_size)
             span.set_attribute("violations.total", len(all_violations))
             set_span_output(span, {"compliance_percentage": round(
                 (len(test_cases) * 9 - len(all_violations)) / (len(test_cases) * 9) * 100

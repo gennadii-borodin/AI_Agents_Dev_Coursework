@@ -33,25 +33,31 @@ def _fix_json(text: str) -> str:
     text = re.sub(r",\s*}", "}", text)
     text = re.sub(r",\s*]", "]", text)
     return text
-PRIORITY_WEIGHTS = {"Critical": 3, "High": 2, "Medium": 1, "Low": 0.5}
-
-
-def _recompute_coverage(data: dict) -> dict:
+def _recompute_coverage(data: dict, settings: Optional[Settings] = None) -> dict:
     """Пересчитывает агрегаты покрытия в коде по матрице требований.
 
     LLM возвращает матрицу с флагом covered/weight/priority по каждому
     требованию; итоговые проценты и остаточный риск вычисляются детерминированно,
-    без полагания на арифметику модели.
+    без полагания на арифметику модели. Вес берётся из поля ``weight`` матрицы,
+    а при его отсутствии — из ``settings.priority_weights`` по приоритету.
+    Пороги остаточного риска — из настроек.
     """
+    if settings is None:
+        settings = get_settings()
+    weights = settings.priority_weights
+
     matrix = data.get("matrix") or []
     if not matrix:
         return data
 
     def _w(m: dict) -> float:
         try:
-            return float(m.get("weight") or 0.0)
+            w = float(m.get("weight") or 0.0)
         except (TypeError, ValueError):
-            return 0.0
+            w = 0.0
+        if not w:
+            w = float(weights.get(str(m.get("priority") or "").strip(), 0.0))
+        return w
 
     total_w = sum(_w(m) for m in matrix)
     covered_w = sum(_w(m) for m in matrix if m.get("covered"))
@@ -62,9 +68,9 @@ def _recompute_coverage(data: dict) -> dict:
     crit_covered = sum(_w(m) for m in critical if m.get("covered"))
     critical_coverage = round(crit_covered / crit_total * 100, 1) if crit_total else 0.0
 
-    if total_coverage < 80 or critical_coverage < 100:
+    if total_coverage < settings.coverage_risk_high_threshold or critical_coverage < 100:
         residual_risk = "high"
-    elif total_coverage < 95:
+    elif total_coverage < settings.coverage_risk_medium_threshold:
         residual_risk = "medium"
     else:
         residual_risk = "low"
@@ -233,8 +239,6 @@ def run_coverage_agent(
                 {"role": "user", "content": user_message},
             ],
             model=settings.model_senior,
-            temperature=0.1,
-            max_tokens=16384,
             response_format={
                 "type": "json_schema",
                 "json_schema": {
@@ -251,7 +255,7 @@ def run_coverage_agent(
             data = json.loads(response)
             # Агрегаты считаются в коде по матрице (LLM только классифицирует
             # покрытие по каждому требованию), чтобы исключить ошибки вычислений.
-            data = _recompute_coverage(data)
+            data = _recompute_coverage(data, settings)
             set_span_output(
                 span,
                 {"total_coverage": data.get("total_coverage")},
@@ -269,7 +273,7 @@ def run_coverage_agent(
                     data = repaired
                 else:
                     raise ValueError(f"Unexpected type: {type(repaired)}")
-                data = _recompute_coverage(data)
+                data = _recompute_coverage(data, settings)
                 set_span_output(
                     span,
                     {"total_coverage": data.get("total_coverage")},

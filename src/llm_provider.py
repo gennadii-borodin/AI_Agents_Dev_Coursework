@@ -41,14 +41,14 @@ def _on_retry(retry_state):
 class RouterAIProvider:
     def __init__(self, settings: Optional[Settings] = None):
         self.settings = settings or get_settings()
-        self.base_url = "https://routerai.ru/api/v1"
+        self.base_url = self.settings.routerai_base_url
         self.headers = {
             "Authorization": f"Bearer {self.settings.router_ai_api_key}",
             "Content-Type": "application/json",
         }
 
     @retry(
-        stop=stop_after_attempt(3),
+        stop=stop_after_attempt(get_settings().llm_retry_attempts),
         wait=wait_exponential(multiplier=1, min=2, max=10),
         reraise=True,
         before_sleep=_on_retry,
@@ -57,17 +57,19 @@ class RouterAIProvider:
         self,
         messages: list[dict[str, str]],
         model: Optional[str] = None,
-        temperature: float = 0.1,
+        temperature: Optional[float] = None,
         max_tokens: Optional[int] = None,
         json_mode: bool = False,
         response_format: Optional[dict[str, Any]] = None,
     ) -> str:
         model = model or self.settings.model_senior
+        temperature = self.settings.llm_temperature if temperature is None else temperature
+        max_tokens = self.settings.llm_max_tokens if max_tokens is None else max_tokens
         payload: dict[str, Any] = {
             "model": model,
             "messages": messages,
             "temperature": temperature,
-            "max_tokens": max_tokens or 8192,
+            "max_tokens": max_tokens,
         }
         if response_format is not None:
             payload["response_format"] = response_format
@@ -75,7 +77,7 @@ class RouterAIProvider:
             payload["response_format"] = {"type": "json_object"}
 
         with trace_llm(
-            model, messages, temperature, max_tokens or 8192, bool(response_format or json_mode)
+            model, messages, temperature, max_tokens, bool(response_format or json_mode)
         ) as span:
             try:
                 content, usage = self._do_request(payload)
@@ -170,11 +172,11 @@ class RouterAIProvider:
                 "messages": messages,
                 "tools": tools,
                 "tool_choice": tool_choice,
-                "temperature": 0.1,
+                "temperature": self.settings.llm_temperature,
             }
             try:
                 with trace_llm(
-                    model, messages, 0.1, self.settings.max_output_tokens, False
+                    model, messages, self.settings.llm_temperature, self.settings.llm_max_tokens, False
                 ) as span:
                     with httpx.Client(timeout=self.settings.llm_timeout_seconds) as client:
                         response = client.post(

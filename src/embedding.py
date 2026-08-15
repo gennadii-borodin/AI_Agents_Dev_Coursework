@@ -13,9 +13,9 @@ logger = logging.getLogger(__name__)
 class EmbeddingProvider:
     def __init__(self, settings: Optional[Settings] = None):
         self.settings = settings or get_settings()
-        self.base_url = "https://routerai.ru/api/v1"
+        self.base_url = self.settings.routerai_base_url
         self.headers = {
-            "Authorization": f"Bearer {self.settings.openai_api_key}",
+            "Authorization": f"Bearer {self.settings.router_ai_api_key}",
             "Content-Type": "application/json",
         }
 
@@ -33,7 +33,7 @@ class EmbeddingProvider:
 
         try:
             with trace_embedding(model, text) as span:
-                with httpx.Client(timeout=30) as client:
+                with httpx.Client(timeout=self.settings.embedding_timeout_seconds) as client:
                     response = client.post(
                         f"{self.base_url}/embeddings",
                         headers=self.headers,

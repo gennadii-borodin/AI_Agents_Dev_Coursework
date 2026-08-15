@@ -1,14 +1,20 @@
 from functools import lru_cache
+from typing import Optional
 
-from pydantic_settings import BaseSettings
+from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
     router_ai_api_key: str
-    openai_api_key: str
     database_url: str
-    phoenix_port: int = 6006
-    phoenix_http_endpoint: str = "http://localhost:6006/v1/traces"
+
+    # Базовый URL LLM- и embedding-провайдера (RouterAI). Переопределяется
+    # через ROUTERAI_BASE_URL, если нужен прокси/staging/другой шлюз.
+    routerai_base_url: str = "https://routerai.ru/api/v1"
+
+    # Phoenix (Arize) — OTLP/gRPC эндпоинт для трассировки.
+    phoenix_grpc_port: int = 4317
+    phoenix_grpc_endpoint: Optional[str] = None
 
     model_senior: str = "deepseek/deepseek-v4-pro-0813"
     model_junior: str = "deepseek/deepseek-v4-flash-0731"
@@ -17,23 +23,39 @@ class Settings(BaseSettings):
     embedding_dimension: int = 1536
     rag_top_k: int = 10
 
-    llm_retry_attempts: int = 3
+    # Параметры генерации LLM (переопределяются через .env).
+    llm_temperature: float = 0.1
+    llm_max_tokens: int = 16384
     llm_timeout_seconds: int = 60
-    max_output_tokens: int = 4096
+    embedding_timeout_seconds: int = 30
+    llm_retry_attempts: int = 3
+
+    # Пороги бизнес-логики агентов.
+    agents_chunk_size: int = 50
+    sql_max_rows: int = 1000
+    priority_weights: dict = {
+        "Critical": 3,
+        "High": 2,
+        "Medium": 1,
+        "Low": 0.5,
+    }
+    coverage_risk_high_threshold: float = 80.0
+    coverage_risk_medium_threshold: float = 95.0
 
     # Стоимость токенов (USD за 1M) по моделям. Переопределяется через
-    # MODEL_PRICING в .env. Значения по умолчанию — публичные цены DeepSeek V3;
-    # замените на актуальные цены RouterAI.
+    # MODEL_PRICING в .env (JSON). Значения по умолчанию — публичные цены
+    # DeepSeek V3; замените на актуальные цены RouterAI.
     model_pricing: dict = {
         "deepseek/deepseek-v4-pro-0813": {"input": 0.27, "output": 1.10},
         "deepseek/deepseek-v4-flash-0731": {"input": 0.10, "output": 0.40},
         "openai/text-embedding-3-small": {"input": 0.02, "output": 0.0},
     }
 
-    class Config:
-        env_file = ".env"
-        env_file_encoding = "utf-8"
-        extra = "ignore"
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_file_encoding="utf-8",
+        extra="ignore",
+    )
 
 
 @lru_cache

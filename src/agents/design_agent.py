@@ -143,8 +143,6 @@ def run_design_agent(
                 {"role": "user", "content": user_message},
             ],
             model=settings.model_senior,
-            temperature=0.1,
-            max_tokens=16384,
             response_format={
                 "type": "json_schema",
                 "json_schema": {
