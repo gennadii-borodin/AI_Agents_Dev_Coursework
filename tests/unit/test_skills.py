@@ -39,7 +39,7 @@ def test_build_tool_definition_maps_types():
 def test_registry_exposes_tools():
     registry = ToolRegistry()
     names = {t["function"]["name"] for t in registry.tools}
-    assert names == {"sql_query", "rag_search"}
+    assert names == {"sql_query", "rag_search", "code_validator"}
 
 
 def test_registry_unknown_tool_returns_message():

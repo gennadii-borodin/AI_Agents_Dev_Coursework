@@ -1,0 +1,16 @@
+name: code_validator
+version: "1.0"
+description: |
+  Детерминированный статический валидатор тест-кейсов. Проверяет структуру
+  и заполненность полей (пустые/placeholder прекондиции, тестовые данные,
+  ожидаемый результат, шаги; несбалансированные скобки; дубликаты) без
+  обращения к LLM. Используется design-агентом как источник достоверных
+  фактов вместо LLM-гипотез о валидности тестов (revью T6, Этап 5).
+
+input_schema:
+  test_cases: list
+  known_requirement_ids: optional[list]
+
+output_schema:
+  findings: list
+  checked: int

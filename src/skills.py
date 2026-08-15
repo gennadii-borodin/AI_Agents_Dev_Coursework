@@ -118,6 +118,13 @@ class ToolRegistry:
                 args["query"],
                 args.get("top_k", 10),
             )
+        if name == "code_validator":
+            from src.tools.code_validator import validate_test_cases
+
+            return validate_test_cases(
+                args["test_cases"],
+                set(args["known_requirement_ids"]) if args.get("known_requirement_ids") else None,
+            )
         return f"Unhandled tool: {name}"
 
     def execute_to_json(self, name: str, args: dict[str, Any]) -> str:

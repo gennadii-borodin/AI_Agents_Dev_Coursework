@@ -11,54 +11,31 @@ from .helpers import ScriptedLLM, apply_llm_patch
 pytestmark = [pytest.mark.integration]
 
 
-def test_resume_skips_already_done_agents(monkeypatch, isolate_services):
-    """Сбой на Standards не теряет прогон: resume по thread_id не перезапускает
-    уже готовые агенты и не делает лишних LLM-вызовов (adversarial #2)."""
-    from langgraph.checkpoint.memory import MemorySaver
+def test_agent_failure_does_not_abort_review(monkeypatch, isolate_services):
+    """Сбой одного агента не прерывает весь прогон (revью T6/C2, Этап 5).
 
+    Падающий Standards оставляет partial-отчёт (None), но coverage/design
+    считаются, ошибка фиксируется в state.errors, и граф завершается без
+    исключения (adversarial #2 в новой модели устойчивости).
+    """
     from src.graph import build_graph, run_standards_agent
 
-    real_standards = run_standards_agent
-    calls = {"n": 0}
+    def boom(*args, **kwargs):
+        raise RuntimeError("standards boom (simulated)")
 
-    def flaky_standards(*args, **kwargs):
-        calls["n"] += 1
-        if calls["n"] == 1:
-            raise RuntimeError("standards boom (simulated)")
-        return real_standards(*args, **kwargs)
-
-    monkeypatch.setattr("src.graph.run_standards_agent", flaky_standards)
+    monkeypatch.setattr("src.graph.run_standards_agent", boom)
 
     stub = ScriptedLLM()
     apply_llm_patch(monkeypatch, stub)
 
-    ckpt = MemorySaver()
-    g = build_graph(ckpt)
-    config = {"configurable": {"thread_id": "resume-1"}}
+    g = build_graph()
+    result = g.invoke(ReviewState(user_query="провести полное ревью"))
 
-    try:
-        g.invoke(ReviewState(user_query="провести полное ревью"), config=config)
-    except RuntimeError:
-        pass
-
-    # из чекпоинта: coverage и design уже посчитаны, standards — нет
-    snap = g.get_state(config)
-    partial = ReviewState.model_validate(snap.values)
-    assert partial.coverage_report is not None
-    assert partial.design_report is not None
-    assert partial.standards_report is None
-
-    calls_before_resume = len(stub.calls)
-
-    final = g.invoke(None, config=config)
-    final_state = ReviewState.model_validate(final)
-    assert final_state.standards_report is not None
-
-    # при resume новые LLM-вызовы — только standards (роутер/coverage/design пропущены)
-    new_calls = stub.calls[calls_before_resume:]
-    new_systems = [c[2][0].get("content", "") for c in new_calls]
-    assert not any("покрытия" in s for s in new_systems)
-    assert not any("дизайн" in s for s in new_systems)
+    # прогон завершён, несмотря на падение standards
+    assert result["coverage_report"] is not None
+    assert result["design_report"] is not None
+    assert result.get("standards_report") is None
+    assert any("standards" in e for e in (result.get("errors") or []))
 
 
 def test_run_review_saves_partial_reports_on_failure(monkeypatch, isolate_services):

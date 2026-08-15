@@ -125,6 +125,19 @@ def run_design_agent(
         req_json = json.dumps(req_data, ensure_ascii=False)
         tc_json = json.dumps(tc_data, ensure_ascii=False)
 
+        # Детерминированная статическая валидация (revью T6, Этап 5): вместо
+        # LLM-гипотез о «валидности» тестов — реальные находки по структуре.
+        # Передаём их модели как достоверные факты, снижая долю галлюцинаций.
+        from src.tools.code_validator import validate_test_cases
+
+        known_req_ids = {r["requirement_id"].upper() for r in req_data}
+        static = validate_test_cases([tc.model_dump() for tc in test_cases], known_req_ids)
+        static_lines = [
+            f"- {f['test_case_id']}: {', '.join(f['issues'])}"
+            for f in static["findings"]
+        ]
+        static_block = "\n".join(static_lines) if static_lines else "(структурных проблем не найдено)"
+
         user_message = f"""Оцени качество тест-дизайна.
 
 ## Требования ({len(req_data)}):
@@ -132,6 +145,9 @@ def run_design_agent(
 
 ## Тест-кейсы ({len(tc_data)}):
 {tc_json}
+
+## Детерминированные находки статического валидатора (достоверны, не гадай):
+{static_block}
 
 Верни отчёт о качестве тест-дизайна в формате JSON."""
 

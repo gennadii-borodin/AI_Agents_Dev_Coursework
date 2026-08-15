@@ -144,31 +144,43 @@ def _fan_out(state: ReviewState) -> list:
 
 def run_coverage_node(state: ReviewState) -> dict:
     logger.info("Running Coverage Agent")
-    report = run_coverage_agent(
-        requirement_ids=state.requirement_ids,
-        requirements=state.requirements or None,
-        test_cases=state.test_cases or None,
-    )
-    return {"coverage_report": report}
+    try:
+        report = run_coverage_agent(
+            requirement_ids=state.requirement_ids,
+            requirements=state.requirements or None,
+            test_cases=state.test_cases or None,
+        )
+        return {"coverage_report": report}
+    except Exception as e:
+        logger.exception("Coverage agent failed")
+        return {"errors": [f"coverage: {type(e).__name__}: {e}"]}
 
 
 def run_design_node(state: ReviewState) -> dict:
     logger.info("Running Design Agent")
-    report = run_design_agent(
-        requirement_ids=state.requirement_ids,
-        requirements=state.requirements or None,
-        test_cases=state.test_cases or None,
-    )
-    return {"design_report": report}
+    try:
+        report = run_design_agent(
+            requirement_ids=state.requirement_ids,
+            requirements=state.requirements or None,
+            test_cases=state.test_cases or None,
+        )
+        return {"design_report": report}
+    except Exception as e:
+        logger.exception("Design agent failed")
+        return {"errors": [f"design: {type(e).__name__}: {e}"]}
 
 
 def run_standards_node(state: ReviewState) -> dict:
     logger.info("Running Standards Agent")
-    report = run_standards_agent(
-        requirement_ids=state.requirement_ids,
-        test_cases=state.test_cases or None,
-    )
-    return {"standards_report": report}
+    try:
+        report = run_standards_agent(
+            requirement_ids=state.requirement_ids,
+            test_cases=state.test_cases or None,
+        )
+        return {"standards_report": report}
+    except Exception as e:
+        logger.exception("Standards agent failed")
+        return {"errors": [f"standards: {type(e).__name__}: {e}"]}
 
 
 def run_find_unlinked_node(state: ReviewState) -> ReviewState:
