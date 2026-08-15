@@ -1,5 +1,5 @@
 import logging
-from typing import Any
+from typing import Any, Optional
 
 import psycopg
 from psycopg.rows import dict_row
