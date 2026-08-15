@@ -257,14 +257,23 @@ def trace_llm(
 
 @contextmanager
 def trace_tool(name: str, parameters: dict, tool_type: str = "TOOL"):
-    """Спан вызова инструмента (SQL, RAG)."""
+    """Спан вызова инструмента (SQL, RAG).
+
+    В этой версии semconv/Phoenix (<=20.2.1) поле ``tool.parameters`` парсится
+    в объект и рендерится как React-child -> React error #31. Поэтому в
+    ``tool.parameters`` кладём plain-строку, а структурированные аргументы —
+    в ``input.value`` (JSON-строка, которую Phoenix отображает безопасно).
+    """
     kind = getattr(OpenInferenceSpanKindValues, tool_type, OpenInferenceSpanKindValues.TOOL)
+    params_str = ", ".join(f"{k}={v}" for k, v in (parameters or {}).items())
     with trace_span(
         f"Tool {name}",
         kind=kind,
         attributes={
             SpanAttributes.TOOL_NAME: name,
-            SpanAttributes.TOOL_PARAMETERS: _json(parameters),
+            SpanAttributes.TOOL_PARAMETERS: params_str,
+            SpanAttributes.INPUT_VALUE: _json(parameters),
+            SpanAttributes.INPUT_MIME_TYPE: "application/json",
         },
     ) as span:
         yield span
