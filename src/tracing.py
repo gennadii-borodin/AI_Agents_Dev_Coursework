@@ -244,10 +244,10 @@ def trace_llm(
             SpanAttributes.LLM_MODEL_NAME: model,
             SpanAttributes.LLM_PROVIDER: "routerai",
             SpanAttributes.LLM_INVOCATION_PARAMETERS: _json(invocation),
-            SpanAttributes.LLM_INPUT_MESSAGES: _json([
-                {"message": {"role": m.get("role"), "content": (m.get("content") or "")[:4000]}}
+            SpanAttributes.LLM_INPUT_MESSAGES: [
+                _json({"message": {"role": m.get("role"), "content": (m.get("content") or "")[:4000]}})
                 for m in messages
-            ]),
+            ],
             SpanAttributes.INPUT_VALUE: _json(input_value),
             SpanAttributes.INPUT_MIME_TYPE: "application/json",
         },
@@ -351,7 +351,7 @@ def set_llm_output(span, content: str):
     try:
         span.set_attribute(
             SpanAttributes.LLM_OUTPUT_MESSAGES,
-            _json([{"message": {"role": "assistant", "content": str(content)[:4000]}}]),
+            [_json({"message": {"role": "assistant", "content": str(content)[:4000]}})],
         )
     except Exception:
         pass
@@ -361,24 +361,24 @@ def set_retrieval_documents(span, documents: list[dict]):
     if span is None or not documents:
         return
     try:
-        span.set_attribute(
-            SpanAttributes.RETRIEVAL_DOCUMENTS,
-            _json([
-                {
-                    "id": d.get("id"),
-                    "score": d.get("similarity"),
-                    "document": {
-                        "content": (d.get("content") or "")[:2000],
-                        "metadata": {
-                            "title": d.get("title"),
-                            "category": d.get("category"),
-                            "priority": d.get("priority"),
-                        },
+        # OpenInference ожидает retrieval.documents КАК МАССИВ (list) JSON-строк,
+        # иначе Phoenix падает с "t[M.documents]?.map is not a function".
+        docs = [
+            _json({
+                "id": d.get("id"),
+                "score": d.get("similarity"),
+                "document": {
+                    "content": (d.get("content") or "")[:2000],
+                    "metadata": {
+                        "title": d.get("title"),
+                        "category": d.get("category"),
+                        "priority": d.get("priority"),
                     },
-                }
-                for d in documents
-            ]),
-        )
+                },
+            })
+            for d in documents
+        ]
+        span.set_attribute(SpanAttributes.RETRIEVAL_DOCUMENTS, docs)
     except Exception:
         pass
 
