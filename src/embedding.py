@@ -5,7 +5,7 @@ import httpx
 from tenacity import retry, stop_after_attempt, wait_exponential
 
 from src.config import Settings, get_settings
-from src.tracing import trace_embedding, set_span_output
+from src.tracing import set_span_output, trace_embedding
 
 logger = logging.getLogger(__name__)
 

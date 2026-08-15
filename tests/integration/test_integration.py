@@ -10,7 +10,6 @@
 import os
 import sys
 from pathlib import Path
-from unittest.mock import patch, MagicMock
 
 import pytest
 
@@ -106,13 +105,13 @@ class TestReportGeneration:
         assert len(standards.violations) == 1
 
     def test_markdown_generation(self):
+        from src.models import CoverageReport, DesignReport, ReviewState, StandardsReport
         from src.report import (
             generate_coverage_markdown,
             generate_design_markdown,
             generate_standards_markdown,
             generate_summary_markdown,
         )
-        from src.models import CoverageReport, DesignReport, StandardsReport, ReviewState
 
         coverage = CoverageReport(
             total_coverage=85.0,

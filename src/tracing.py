@@ -1,24 +1,24 @@
+import logging
 import os
+import socket
 import time
 import uuid
-import logging
-import socket
 from contextlib import contextmanager
 from typing import Any, Optional
 
 logger = logging.getLogger(__name__)
 
 try:
+    from openinference.semconv.trace import (
+        OpenInferenceSpanKindValues,
+        SpanAttributes,
+    )
     from opentelemetry import trace as otel_trace
-    from opentelemetry.trace import Status, StatusCode
-    from opentelemetry.sdk.trace import TracerProvider
-    from opentelemetry.sdk.trace.export import SimpleSpanProcessor
     from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExporter
     from opentelemetry.sdk.resources import Resource
-    from openinference.semconv.trace import (
-        SpanAttributes,
-        OpenInferenceSpanKindValues,
-    )
+    from opentelemetry.sdk.trace import TracerProvider
+    from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+    from opentelemetry.trace import Status, StatusCode
     OTEL_AVAILABLE = True
 except ImportError:
     OTEL_AVAILABLE = False

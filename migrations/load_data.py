@@ -1,4 +1,3 @@
-import csv
 import logging
 import sys
 from pathlib import Path
@@ -62,22 +61,23 @@ def run_migration(
         with psycopg.connect(settings.database_url) as conn:
             register_vector(conn)
 
-            migration_sql = (Path(__file__).parent.parent / "migrations" / "001_initial.sql").read_text(encoding="utf-8")
+            migration_path = Path(__file__).parent.parent / "migrations" / "001_initial.sql"
+            migration_sql = migration_path.read_text(encoding="utf-8")
             conn.execute(migration_sql)
             console.print("[green]OK: Таблицы созданы[/green]")
+
+            embedding_provider = EmbeddingProvider(settings) if not skip_embeddings else None
 
             with conn.cursor() as cur:
                 cur.execute("SELECT COUNT(*) FROM requirements")
                 req_count = cur.fetchone()[0]
                 if req_count > 0:
                     console.print("[yellow]WARN: Данные уже загружены.[/yellow]")
-                    if not skip_embeddings and embedding_provider:
+                    if embedding_provider:
                         _backfill_embeddings(conn, embedding_provider)
                     else:
                         console.print("[green]OK: Пропуск эмбеддингов.[/green]")
                     return
-
-            embedding_provider = EmbeddingProvider(settings) if not skip_embeddings else None
 
             requirements_file = data_dir / "requirements.csv"
             if requirements_file.exists():
@@ -102,7 +102,12 @@ def run_migration(
         sys.exit(1)
 
 
-def _load_requirements(conn, filepath: Path, embeddings: Optional[EmbeddingProvider], skip_embeddings: bool):
+def _load_requirements(
+    conn,
+    filepath: Path,
+    embeddings: Optional[EmbeddingProvider],
+    skip_embeddings: bool,
+):
     rows = _read_csv_clean(filepath)
 
     with Progress() as progress:
@@ -139,7 +144,12 @@ def _load_requirements(conn, filepath: Path, embeddings: Optional[EmbeddingProvi
             _insert_requirements(conn, batch)
 
 
-def _load_test_cases(conn, filepath: Path, embeddings: Optional[EmbeddingProvider], skip_embeddings: bool):
+def _load_test_cases(
+    conn,
+    filepath: Path,
+    embeddings: Optional[EmbeddingProvider],
+    skip_embeddings: bool,
+):
     rows = _read_csv_clean(filepath)
 
     with Progress() as progress:
@@ -213,8 +223,13 @@ def _insert_test_cases(conn, batch: list[tuple]):
 
 def _backfill_embeddings(conn, embeddings: EmbeddingProvider) -> None:
     """Дозаполняет эмбеддинги для строк, где embedding IS NULL (повторный запуск миграции)."""
-    with conn.cursor() as cur:
-        cur.execute("SELECT requirement_id, title, requirement_text FROM requirements WHERE embedding IS NULL")
+    with conn.cursor(
+        row_factory=psycopg.rows.dict_row,
+    ) as cur:
+        cur.execute(
+            "SELECT requirement_id, title, requirement_text "
+            "FROM requirements WHERE embedding IS NULL"
+        )
         reqs = cur.fetchall()
     if reqs:
         console.print(f"[cyan]Backfill эмбеддингов требований: {len(reqs)}[/cyan]")
@@ -232,8 +247,13 @@ def _backfill_embeddings(conn, embeddings: EmbeddingProvider) -> None:
                 )
             conn.commit()
 
-    with conn.cursor() as cur:
-        cur.execute("SELECT test_case_id, title, description FROM test_cases WHERE embedding IS NULL")
+    with conn.cursor(
+        row_factory=psycopg.rows.dict_row,
+    ) as cur:
+        cur.execute(
+            "SELECT test_case_id, title, description "
+            "FROM test_cases WHERE embedding IS NULL"
+        )
         tcs = cur.fetchall()
     if tcs:
         console.print(f"[cyan]Backfill эмбеддингов тест-кейсов: {len(tcs)}[/cyan]")

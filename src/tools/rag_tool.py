@@ -1,18 +1,13 @@
 import logging
 from typing import Any, Optional
 
-import numpy as np
-import psycopg
-from pgvector.psycopg import register_vector
-
 from src.config import Settings, get_settings
 from src.embedding import EmbeddingProvider
 from src.tools.sql_tool import get_connection
 from src.tracing import (
-    trace_retriever,
-    trace_tool,
-    set_span_output,
     set_retrieval_documents,
+    set_span_output,
+    trace_retriever,
 )
 
 logger = logging.getLogger(__name__)

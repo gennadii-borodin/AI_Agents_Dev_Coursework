@@ -157,7 +157,7 @@ def run_find_unlinked_node(state: ReviewState) -> ReviewState:
     return state
 
 
-def build_graph() -> StateGraph:
+def build_graph(checkpointer=None) -> StateGraph:
     workflow = StateGraph(ReviewState)
 
     workflow.add_node("router", route_request)
@@ -194,4 +194,4 @@ def build_graph() -> StateGraph:
     workflow.add_conditional_edges("standards", _route_next, agent_targets)
     workflow.add_edge("find_unlinked", END)
 
-    return workflow.compile()
+    return workflow.compile(checkpointer=checkpointer)
