@@ -146,3 +146,11 @@ response_json: |
     "auto_fix_available": [""],
     "human_review_required": [""]
   }
+
+few_shot:
+  - input: "TC-001 имеет пустое поле steps; TC-002 содержит пароль в test_data"
+    output:
+      violations: [{"rule_id": "QA-TEST-005", "severity": "major", "test_case_id": "TC-001", "description": "отсутствуют шаги", "auto_fixable": true}, {"rule_id": "QA-TEST-010", "severity": "critical", "test_case_id": "TC-002", "description": "в test_data указан пароль", "auto_fixable": false}]
+      blocking_violations: ["QA-TEST-010: в test_data указан пароль in TC-002"]
+      auto_fix_available: ["QA-TEST-005: отсутствуют шаги in TC-001"]
+      human_review_required: ["QA-TEST-010: в test_data указан пароль in TC-002"]

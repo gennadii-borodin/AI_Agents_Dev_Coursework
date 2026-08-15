@@ -8,7 +8,7 @@ import json_repair
 from src.config import Settings, get_settings
 from src.llm_provider import RouterAIProvider
 from src.models import DesignReport, Requirement, TestCase
-from src.prompts import build_agent_system_prompt
+from src.prompts import build_agent_system_prompt, build_json_schema
 from src.tools.sql_tool import (
     get_all_requirements,
     get_all_test_cases,
@@ -144,7 +144,13 @@ def run_design_agent(
             ],
             model=settings.model_senior,
             temperature=0.1,
-            json_mode=True,
+            response_format={
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "design_report",
+                    "schema": build_json_schema("design_agent"),
+                },
+            },
         )
 
         if span is not None:

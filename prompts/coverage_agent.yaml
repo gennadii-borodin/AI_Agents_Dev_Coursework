@@ -118,3 +118,16 @@ response_json: |
     "recommendations": [""],
     "residual_risk": "low"
   }
+
+few_shot:
+  - input: "REQ-001 покрыт TC-001 (позитивный) и TC-002 (негативный); REQ-002 вообще без тестов"
+    output:
+      total_coverage: 50.0
+      critical_coverage: 100.0
+      matrix: [{"requirement_id": "REQ-001", "priority": "Critical", "weight": 3.0, "covered": true, "test_count": 2, "test_types": ["positive", "negative"]}, {"requirement_id": "REQ-002", "priority": "High", "weight": 2.0, "covered": false, "test_count": 0, "test_types": []}]
+      uncovered_requirements: ["REQ-002"]
+      tests_without_requirements: []
+      indirect_coverage: []
+      gaps: ["REQ-002: нет ни позитивных, ни негативных тестов"]
+      recommendations: ["Добавить тесты на REQ-002"]
+      residual_risk: "medium"

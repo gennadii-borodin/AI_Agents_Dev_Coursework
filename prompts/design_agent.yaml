@@ -136,3 +136,14 @@ response_json: |
     "recommendations": [""],
     "test_scores": [{"test_case_id": "", "score": 0.0}]
   }
+
+few_shot:
+  - input: "TC-001 проверяет только позитивный сценарий логина; нет негативных и граничных тестов"
+    output:
+      overall_score: 45.0
+      techniques_applied: [{"technique": "equivalence partitioning", "coverage": "partial"}]
+      missing_techniques: ["boundary value analysis", "decision table testing"]
+      weak_tests: [{"test_case_id": "TC-001", "reason": "нет негативных и граничных тестов"}]
+      duplicate_tests: []
+      recommendations: ["добавить негативный тест на неверный пароль", "добавить BVA для длины пароля"]
+      test_scores: [{"test_case_id": "TC-001", "score": 45.0}]

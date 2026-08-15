@@ -1,0 +1,53 @@
+# Реестр правил QA-TEST, по которым агент стандартов классифицирует нарушения.
+# Единственный источник истины для правил оформления тест-кейсов.
+rules:
+  - id: QA-TEST-001
+    title: Идентификатор
+    severity: major
+    auto_fixable: false
+    blocking: false
+  - id: QA-TEST-002
+    title: Название
+    severity: major
+    auto_fixable: true
+    blocking: false
+  - id: QA-TEST-003
+    title: Связь с требованиями
+    severity: major
+    auto_fixable: false
+    blocking: false
+  - id: QA-TEST-004
+    title: Описание
+    severity: minor
+    auto_fixable: true
+    blocking: false
+  - id: QA-TEST-005
+    title: Шаги
+    severity: major
+    auto_fixable: true
+    blocking: false
+  - id: QA-TEST-006
+    title: Ожидаемые результаты
+    severity: major
+    auto_fixable: true
+    blocking: false
+  - id: QA-TEST-007
+    title: Негативные тесты
+    severity: major
+    auto_fixable: false
+    blocking: false
+  - id: QA-TEST-008
+    title: Типы тестов
+    severity: minor
+    auto_fixable: false
+    blocking: false
+  - id: QA-TEST-009
+    title: Приоритет
+    severity: minor
+    auto_fixable: true
+    blocking: false
+  - id: QA-TEST-010
+    title: Тестовые данные
+    severity: critical
+    auto_fixable: false
+    blocking: true

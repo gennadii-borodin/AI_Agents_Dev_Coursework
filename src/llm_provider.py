@@ -60,6 +60,7 @@ class RouterAIProvider:
         temperature: float = 0.1,
         max_tokens: Optional[int] = None,
         json_mode: bool = False,
+        response_format: Optional[dict[str, Any]] = None,
     ) -> str:
         model = model or self.settings.model_senior
         payload: dict[str, Any] = {
@@ -68,31 +69,42 @@ class RouterAIProvider:
             "temperature": temperature,
             "max_tokens": max_tokens or 8192,
         }
-        if json_mode:
+        if response_format is not None:
+            payload["response_format"] = response_format
+        elif json_mode:
             payload["response_format"] = {"type": "json_object"}
 
-        with trace_llm(model, messages, temperature, max_tokens or 8192, json_mode) as span:
+        with trace_llm(
+            model, messages, temperature, max_tokens or 8192, bool(response_format or json_mode)
+        ) as span:
             try:
                 content, usage = self._do_request(payload)
-                set_span_output(span, content, mime_type="text/plain")
-                set_llm_output(span, content)
-                if usage:
-                    set_span_tokens(
-                        span,
-                        prompt_tokens=int(usage.get("prompt_tokens") or 0),
-                        completion_tokens=int(usage.get("completion_tokens") or 0),
-                        model=model,
-                    )
-                else:
-                    set_span_tokens(
-                        span,
-                        prompt_tokens=len(json.dumps({"messages": messages}, ensure_ascii=False)) // 4,
-                        completion_tokens=len(content) // 4,
-                        model=model,
-                    )
-                return content
             except Exception:
-                raise
+                # Модель/провайдер может не поддерживать strict json_schema —
+                # откатываемся к обычному json_mode.
+                if response_format is not None and response_format.get("type") == "json_schema":
+                    payload.pop("response_format", None)
+                    payload["response_format"] = {"type": "json_object"}
+                    content, usage = self._do_request(payload)
+                else:
+                    raise
+            set_span_output(span, content, mime_type="text/plain")
+            set_llm_output(span, content)
+            if usage:
+                set_span_tokens(
+                    span,
+                    prompt_tokens=int(usage.get("prompt_tokens") or 0),
+                    completion_tokens=int(usage.get("completion_tokens") or 0),
+                    model=model,
+                )
+            else:
+                set_span_tokens(
+                    span,
+                    prompt_tokens=len(json.dumps({"messages": messages}, ensure_ascii=False)) // 4,
+                    completion_tokens=len(content) // 4,
+                    model=model,
+                )
+            return content
 
     def _do_request(self, payload: dict[str, Any]) -> tuple[str, dict]:
         try:
@@ -157,7 +169,9 @@ class RouterAIProvider:
                 "temperature": 0.1,
             }
             try:
-                with trace_llm(model, messages, 0.1, self.settings.max_output_tokens, False) as span:
+                with trace_llm(
+                    model, messages, 0.1, self.settings.max_output_tokens, False
+                ) as span:
                     with httpx.Client(timeout=self.settings.llm_timeout_seconds) as client:
                         response = client.post(
                             f"{self.base_url}/chat/completions",

@@ -1,19 +1,39 @@
+import functools
 import json
 import logging
 import re
-from typing import Optional
+from pathlib import Path
+from typing import Any, Optional
 
 import json_repair
+import yaml
 
 from src.config import Settings, get_settings
 from src.llm_provider import RouterAIProvider
 from src.models import StandardsReport, TestCase
-from src.prompts import build_agent_system_prompt
+from src.prompts import build_agent_system_prompt, build_json_schema
 from src.tools.sql_tool import get_all_test_cases, get_test_cases_by_reqs
 from src.tracing import OTEL_AVAILABLE
 from src.tracing import otel_trace as _otel_trace
 
 logger = logging.getLogger(__name__)
+
+
+@functools.lru_cache(maxsize=None)
+def load_standards_rules() -> dict[str, Any]:
+    """Загружает реестр правил QA-TEST из data/standards_rules.yaml."""
+    path = Path(__file__).resolve().parent.parent.parent / "data" / "standards_rules.yaml"
+    with open(path, "r", encoding="utf-8") as f:
+        return yaml.safe_load(f)
+
+
+@functools.lru_cache(maxsize=None)
+def rule_classification() -> tuple[frozenset, frozenset]:
+    """Возвращает (blocking_rule_ids, auto_fix_rule_ids) из реестра правил."""
+    rules = load_standards_rules().get("rules", [])
+    blocking = frozenset(r["id"] for r in rules if r.get("blocking"))
+    auto_fix = frozenset(r["id"] for r in rules if r.get("auto_fixable"))
+    return blocking, auto_fix
 
 STANDARDS_SYSTEM_PROMPT = build_agent_system_prompt("standards_agent")
 
@@ -92,7 +112,13 @@ def _analyze_chunk(chunk_data: list[dict], llm: RouterAIProvider, settings: Sett
         ],
         model=settings.model_senior,
         temperature=0.1,
-        json_mode=True,
+        response_format={
+            "type": "json_schema",
+            "json_schema": {
+                "name": "standards_chunk",
+                "schema": build_json_schema("standards_agent"),
+            },
+        },
     )
     logger.info(f"LLM response length: {len(response) if response else 0}")
 
@@ -161,23 +187,23 @@ def run_standards_agent(
     passed_checks = total_checks - len(all_violations)
     compliance = (passed_checks / total_checks * 100) if total_checks > 0 else 100.0
 
+    blocking_rule_ids, auto_fix_rule_ids = rule_classification()
     blocking = [
         f"{v['rule_id']}: {v['description']} in {v['test_case_id']}"
         for v in all_violations
-        if v["rule_id"] == "QA-TEST-010"
+        if v["rule_id"] in blocking_rule_ids
     ]
 
-    _auto_fix_rules = {"QA-TEST-002", "QA-TEST-004", "QA-TEST-005", "QA-TEST-006", "QA-TEST-009"}
     auto_fix = list(set(
         f"{v['rule_id']}: {v['description']}"
         for v in all_violations
-        if v["rule_id"] in _auto_fix_rules
+        if v["rule_id"] in auto_fix_rule_ids
     ))
 
     human_review = list(set(
         f"{v['rule_id']}: {v['description']} in {v['test_case_id']}"
         for v in all_violations
-        if v["rule_id"] not in _auto_fix_rules
+        if v["rule_id"] not in auto_fix_rule_ids
     ))
 
     return StandardsReport(

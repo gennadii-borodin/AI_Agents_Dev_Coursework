@@ -8,7 +8,7 @@ import json_repair
 from src.config import Settings, get_settings
 from src.llm_provider import RouterAIProvider
 from src.models import CoverageReport, Requirement, TestCase
-from src.prompts import build_agent_system_prompt
+from src.prompts import build_agent_system_prompt, build_json_schema
 from src.tools.sql_tool import (
     get_all_requirements,
     get_all_test_cases,
@@ -33,8 +33,47 @@ def _fix_json(text: str) -> str:
     text = re.sub(r",\s*}", "}", text)
     text = re.sub(r",\s*]", "]", text)
     return text
-
 PRIORITY_WEIGHTS = {"Critical": 3, "High": 2, "Medium": 1, "Low": 0.5}
+
+
+def _recompute_coverage(data: dict) -> dict:
+    """Пересчитывает агрегаты покрытия в коде по матрице требований.
+
+    LLM возвращает матрицу с флагом covered/weight/priority по каждому
+    требованию; итоговые проценты и остаточный риск вычисляются детерминированно,
+    без полагания на арифметику модели.
+    """
+    matrix = data.get("matrix") or []
+    if not matrix:
+        return data
+
+    def _w(m: dict) -> float:
+        try:
+            return float(m.get("weight") or 0.0)
+        except (TypeError, ValueError):
+            return 0.0
+
+    total_w = sum(_w(m) for m in matrix)
+    covered_w = sum(_w(m) for m in matrix if m.get("covered"))
+    total_coverage = round(covered_w / total_w * 100, 1) if total_w else 0.0
+
+    critical = [m for m in matrix if str(m.get("priority") or "").lower() == "critical"]
+    crit_total = sum(_w(m) for m in critical)
+    crit_covered = sum(_w(m) for m in critical if m.get("covered"))
+    critical_coverage = round(crit_covered / crit_total * 100, 1) if crit_total else 0.0
+
+    if total_coverage < 80 or critical_coverage < 100:
+        residual_risk = "high"
+    elif total_coverage < 95:
+        residual_risk = "medium"
+    else:
+        residual_risk = "low"
+
+    data["total_coverage"] = total_coverage
+    data["critical_coverage"] = critical_coverage
+    data["residual_risk"] = residual_risk
+    return data
+
 
 COVERAGE_SYSTEM_PROMPT = build_agent_system_prompt("coverage_agent")
 
@@ -195,7 +234,13 @@ def run_coverage_agent(
             ],
             model=settings.model_senior,
             temperature=0.1,
-            json_mode=True,
+            response_format={
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "coverage_report",
+                    "schema": build_json_schema("coverage_agent"),
+                },
+            },
         )
 
         if span is not None:
@@ -203,6 +248,9 @@ def run_coverage_agent(
 
         try:
             data = json.loads(response)
+            # Агрегаты считаются в коде по матрице (LLM только классифицирует
+            # покрытие по каждому требованию), чтобы исключить ошибки вычислений.
+            data = _recompute_coverage(data)
             set_span_output(
                 span,
                 {"total_coverage": data.get("total_coverage")},
@@ -220,6 +268,7 @@ def run_coverage_agent(
                     data = repaired
                 else:
                     raise ValueError(f"Unexpected type: {type(repaired)}")
+                data = _recompute_coverage(data)
                 set_span_output(
                     span,
                     {"total_coverage": data.get("total_coverage")},
