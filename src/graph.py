@@ -15,6 +15,15 @@ from src.skills import ToolRegistry
 
 logger = logging.getLogger(__name__)
 
+KNOWN_SCENARIOS = {
+    "full_review",
+    "coverage_review",
+    "design_review",
+    "standards_review",
+    "requirement_coverage",
+    "find_unlinked_tests",
+}
+
 
 def _regex_route(query: str) -> tuple[str, list[str]]:
     """Детерминированный запасной роутинг (используется при сбое LLM)."""
@@ -68,8 +77,15 @@ def route_request(state: ReviewState, settings: Optional[Settings] = None) -> Re
         scenario, requirement_ids = _regex_route(state.user_query)
         try:
             llm_scenario, llm_req_ids = _llm_route(state.user_query, llm, settings)
-            if llm_scenario:
-                scenario = llm_scenario
+            # Сценарий остаётся детерминированным (regex) — источник истины.
+            # LLM используется только для извлечения requirement_ids; его
+            # scenario игнорируется (защита от prompt-injection/переопределения — M2).
+            # Невалидный scenario от LLM не должен попасть в state (защита C1).
+            if llm_scenario and llm_scenario not in KNOWN_SCENARIOS:
+                logger.warning(
+                    f"LLM returned unknown scenario '{llm_scenario}', ignored; "
+                    f"keeping regex scenario '{scenario}'"
+                )
             # LLM может не вернуть REQ-идентификаторы — добавляем из регулярки.
             regex_ids = re.findall(r"REQ-\d+", state.user_query.upper())
             merged = list(dict.fromkeys(list(requirement_ids) + llm_req_ids + regex_ids))
@@ -170,7 +186,7 @@ def build_graph(checkpointer=None) -> StateGraph:
 
     workflow.add_conditional_edges(
         "router",
-        lambda state: state.scenario,
+        lambda state: state.scenario if state.scenario in KNOWN_SCENARIOS else "coverage_review",
         {
             "full_review": "coverage",
             "coverage_review": "coverage",

@@ -37,3 +37,32 @@ def test_route_request_falls_back_to_regex_on_llm_error(monkeypatch):
     state = route_request(ReviewState(user_query="проверь покрытие требований"))
     assert state.scenario == "coverage_review"
     assert state.agents_to_run == ["coverage"]
+
+
+def test_unknown_llm_scenario_is_clamped(monkeypatch):
+    def bad_scenario(self, *args, **kwargs):
+        # LLM возвращает сценарий вне допустимого набора (adversarial #1, C1)
+        return '{"scenario": "coverage", "requirement_ids": []}'
+
+    monkeypatch.setattr(
+        "src.llm_provider.RouterAIProvider.chat_completion", bad_scenario
+    )
+
+    state = route_request(ReviewState(user_query="проверь покрытие требований"))
+    # scenario не перезаписывается недопустимым значением; остаётся из regex
+    assert state.scenario == "coverage_review"
+    assert state.agents_to_run == ["coverage"]
+
+
+def test_graph_invoke_does_not_crash_on_unknown_scenario(monkeypatch, isolate_services):
+    from src.graph import build_graph
+    from tests.integration.helpers import ScriptedLLM, apply_llm_patch
+
+    # LLM-роутер возвращает сценарий вне допустимого набора (adversarial #1, C1)
+    stub = ScriptedLLM(router_response='{"scenario": "coverage", "requirement_ids": []}')
+    apply_llm_patch(monkeypatch, stub)
+
+    # без фикса C1 graph.invoke упал бы с ValueError на conditional_edges
+    g = build_graph()
+    result = g.invoke(ReviewState(user_query="проверь покрытие требований"))
+    assert result["scenario"] in {"coverage_review", "full_review"}
