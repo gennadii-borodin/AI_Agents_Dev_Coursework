@@ -35,6 +35,16 @@ def rule_classification() -> tuple[frozenset, frozenset]:
     auto_fix = frozenset(r["id"] for r in rules if r.get("auto_fixable"))
     return blocking, auto_fix
 
+
+@functools.lru_cache(maxsize=None)
+def num_active_rules() -> int:
+    """Число активных правил QA-TEST из реестра (data/standards_rules.yaml).
+
+    Используется как знаменатель метрики compliance вместо магической
+    константы (M3).
+    """
+    return len(load_standards_rules().get("rules", []))
+
 STANDARDS_SYSTEM_PROMPT = build_agent_system_prompt("standards_agent")
 
 
@@ -175,16 +185,27 @@ def run_standards_agent(
             chunk_violations = _analyze_chunk(chunk, llm, settings)
             all_violations.extend(chunk_violations)
 
+        num_rules = num_active_rules()
         if span is not None:
             span.set_attribute("chunks.total", (len(tc_dicts) + chunk_size - 1) // chunk_size)
             span.set_attribute("violations.total", len(all_violations))
-            set_span_output(span, {"compliance_percentage": round(
-                (len(test_cases) * 9 - len(all_violations)) / (len(test_cases) * 9) * 100
-                if test_cases else 100.0, 1)}, mime_type="application/json")
+            if num_rules > 0 and test_cases:
+                denom = len(test_cases) * num_rules
+                compliance_pct = round((denom - len(all_violations)) / denom * 100, 1)
+            else:
+                compliance_pct = 100.0
+            set_span_output(span, {"compliance_percentage": compliance_pct}, mime_type="application/json")
 
-    total_checks = len(test_cases) * 9
-    passed_checks = total_checks - len(all_violations)
-    compliance = (passed_checks / total_checks * 100) if total_checks > 0 else 100.0
+    num_rules = num_active_rules()
+    if num_rules > 0 and test_cases:
+        total_checks = len(test_cases) * num_rules
+        passed_checks = total_checks - len(all_violations)
+        compliance = (passed_checks / total_checks * 100) if total_checks > 0 else 100.0
+    else:
+        if num_rules == 0:
+            logger.warning("standards_rules.yaml is empty; compliance set to 100.0")
+        compliance = 100.0
+    compliance = max(0.0, min(100.0, compliance))
 
     blocking_rule_ids, auto_fix_rule_ids = rule_classification()
     blocking = [
