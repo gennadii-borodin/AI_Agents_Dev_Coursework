@@ -1,7 +1,8 @@
 import logging
+import uuid
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
 from src.config import get_settings
 from src.graph import build_graph
@@ -266,22 +267,66 @@ def save_reports(state: ReviewState) -> dict[str, Path]:
     return saved
 
 
-def run_review(user_query: str) -> ReviewState:
+def run_review(
+    user_query: str,
+    thread_id: Optional[str] = None,
+    checkpointer: Optional[Any] = None,
+) -> ReviewState:
+    """Запускает ревью запроса.
+
+    Args:
+        user_query: текст запроса пользователя.
+        thread_id: идентификатор прогона для checkpoint/resume. Если не задан —
+            генерируется UUID. Тот же ``thread_id`` + ``checkpointer`` позволяют
+            возобновить прогон после сбоя с узла падения (C2).
+        checkpointer: LangGraph checkpointer. По умолчанию ``MemorySaver``
+            (в памяти процесса; для возобновления между перезапусками используйте
+            ``PostgresSaver``).
+
+    При сбое агента в середине прогона частично готовые отчёты всё равно
+    сохраняются (блок ``finally``), а состояние — в checkpointer для resume.
+    """
+    from langgraph.checkpoint.memory import MemorySaver
+
     settings = get_settings()
-    graph = build_graph()
+    if checkpointer is None:
+        checkpointer = MemorySaver()
+    graph = build_graph(checkpointer)
+
+    if thread_id is None:
+        thread_id = str(uuid.uuid4())
+    config = {"configurable": {"thread_id": thread_id}}
 
     scenario = "pending"
     agents = []
+    saved: dict[str, Path] = {}
+    state: ReviewState = ReviewState(user_query=user_query)
     with trace_run(user_query, "pending", []) as run_span:
-        state = ReviewState(user_query=user_query)
-        state = graph.invoke(state)
-
-        def _get(obj, attr, default=None):
-            if isinstance(obj, dict):
-                return obj.get(attr, default)
-            return getattr(obj, attr, default)
+        try:
+            state = graph.invoke(state, config=config)
+        except Exception:
+            logger.exception("Graph run failed mid-execution (thread_id=%s)", thread_id)
+            # C2: подхватываем последнее сохранённое состояние (частичные отчёты)
+            snapshot = graph.get_state(config)
+            if snapshot is not None and snapshot.values is not None:
+                try:
+                    state = ReviewState.model_validate(snapshot.values)
+                except Exception:
+                    logger.exception("Failed to restore partial state from checkpoint")
+            raise
+        finally:
+            # C2: сохраняем частичные отчёты даже при сбое любого агента
+            try:
+                saved = save_reports(state)
+            except Exception:
+                logger.exception("Failed to save partial reports after graph run")
 
         if run_span is not None:
+            def _get(obj, attr, default=None):
+                if isinstance(obj, dict):
+                    return obj.get(attr, default)
+                return getattr(obj, attr, default)
+
             scenario = _get(state, "scenario") or "unknown"
             agents = _get(state, "agents_to_run") or []
             run_span.set_attribute("qa.scenario", scenario)
@@ -319,8 +364,6 @@ def run_review(user_query: str) -> ReviewState:
                 "agents": agents,
             }, mime_type="application/json")
 
-        saved = save_reports(state)
-        if run_span is not None:
             run_span.set_attribute("qa.reports_saved", ",".join(saved.keys()))
 
     print(f"\nOK: Отчёты сохранены в {REPORTS_DIR}")
