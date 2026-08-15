@@ -162,57 +162,58 @@ def run_coverage_agent(
         tc_json = json.dumps(tc_data, ensure_ascii=False)
 
         similar_tests_json = "[]"
-        try:
-            if req_data:
-                from src.skills import ToolRegistry
+        if settings.rag_enabled:
+            try:
+                if req_data:
+                    from src.skills import ToolRegistry
 
-                combined_req_text = " ".join(
-                    f"{r['title']} {r['requirement_text']}" for r in req_data
-                )
-                registry = ToolRegistry()
-                rag_tool = next(
-                    t for t in registry.tools if t["function"]["name"] == "rag_search"
-                )
-                similar_tests: list[dict] = []
-                try:
-                    similar_raw = llm.invoke_with_tools(
-                        system_prompt=(
-                            "Используй инструмент rag_search, чтобы найти семантически "
-                            "похожие тест-кейсы по тексту требований."
-                        ),
-                        user_message=(
-                            "Найди похожие тест-кейсы (коллекция test_cases) по тексту "
-                            f"требований:\n{combined_req_text}"
-                        ),
-                        tools=[rag_tool],
-                        model=settings.model_junior,
-                        return_tool_results=True,
-                        tool_choice={"type": "function", "function": {"name": "rag_search"}},
+                    combined_req_text = " ".join(
+                        f"{r['title']} {r['requirement_text']}" for r in req_data
                     )
-                    similar_tests = json.loads(similar_raw)
-                except Exception as e:
-                    logger.warning(f"invoke_with_tools rag_search failed, using registry: {e}")
-                    similar_tests = registry.execute(
-                        "rag_search",
-                        {
-                            "collection": "test_cases",
-                            "query": combined_req_text,
-                            "top_k": settings.rag_top_k,
-                        },
+                    registry = ToolRegistry()
+                    rag_tool = next(
+                        t for t in registry.tools if t["function"]["name"] == "rag_search"
                     )
-                similar_tests_json = json.dumps(
-                    [
-                        {
-                            "test_case_id": st["id"],
-                            "title": st["title"],
-                            "similarity": round(st["similarity"], 3),
-                        }
-                        for st in similar_tests
-                    ],
-                    ensure_ascii=False,
-                )
-        except Exception as e:
-            logger.warning(f"RAG similarity search skipped: {e}")
+                    similar_tests: list[dict] = []
+                    try:
+                        similar_raw = llm.invoke_with_tools(
+                            system_prompt=(
+                                "Используй инструмент rag_search, чтобы найти семантически "
+                                "похожие тест-кейсы по тексту требований."
+                            ),
+                            user_message=(
+                                "Найди похожие тест-кейсы (коллекция test_cases) по тексту "
+                                f"требований:\n{combined_req_text}"
+                            ),
+                            tools=[rag_tool],
+                            model=settings.model_junior,
+                            return_tool_results=True,
+                            tool_choice={"type": "function", "function": {"name": "rag_search"}},
+                        )
+                        similar_tests = json.loads(similar_raw)
+                    except Exception as e:
+                        logger.warning(f"invoke_with_tools rag_search failed, using registry: {e}")
+                        similar_tests = registry.execute(
+                            "rag_search",
+                            {
+                                "collection": "test_cases",
+                                "query": combined_req_text,
+                                "top_k": settings.rag_top_k,
+                            },
+                        )
+                    similar_tests_json = json.dumps(
+                        [
+                            {
+                                "test_case_id": st["id"],
+                                "title": st["title"],
+                                "similarity": round(st["similarity"], 3),
+                            }
+                            for st in similar_tests
+                        ],
+                        ensure_ascii=False,
+                    )
+            except Exception as e:
+                logger.warning(f"RAG similarity search skipped: {e}")
 
         user_message = f"""Проанализируй требования и тест-кейсы.
 

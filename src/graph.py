@@ -72,30 +72,36 @@ def route_request(state: ReviewState, settings: Optional[Settings] = None) -> Re
         settings = get_settings()
 
     with trace_agent("Router", **{"agent.type": "router"}) as span:
-        llm = RouterAIProvider(settings)
-
         scenario, requirement_ids = _regex_route(state.user_query)
-        try:
-            llm_scenario, llm_req_ids = _llm_route(state.user_query, llm, settings)
-            # Сценарий остаётся детерминированным (regex) — источник истины.
-            # LLM используется только для извлечения requirement_ids; его
-            # scenario игнорируется (защита от prompt-injection/переопределения — M2).
-            # Невалидный scenario от LLM не должен попасть в state (защита C1).
-            if llm_scenario and llm_scenario not in KNOWN_SCENARIOS:
-                logger.warning(
-                    f"LLM returned unknown scenario '{llm_scenario}', ignored; "
-                    f"keeping regex scenario '{scenario}'"
-                )
-            # LLM может не вернуть REQ-идентификаторы — добавляем из регулярки.
-            regex_ids = re.findall(r"REQ-\d+", state.user_query.upper())
-            merged = list(dict.fromkeys(list(requirement_ids) + llm_req_ids + regex_ids))
-            requirement_ids = merged
+        # router-LLM избыточен: его scenario отбрасывается, REQ-IDs и так даёт
+        # regex. Вызов опционален через флаг (revью §2, Этап 3) — по умолчанию
+        # сохраняем поведение, но при router_llm_enabled=False идём без LLM.
+        if settings.router_llm_enabled:
+            llm = RouterAIProvider(settings)
+            try:
+                llm_scenario, llm_req_ids = _llm_route(state.user_query, llm, settings)
+                # Сценарий остаётся детерминированным (regex) — источник истины.
+                # LLM используется только для извлечения requirement_ids; его
+                # scenario игнорируется (защита от prompt-injection/переопределения — M2).
+                # Невалидный scenario от LLM не должен попасть в state (защита C1).
+                if llm_scenario and llm_scenario not in KNOWN_SCENARI:
+                    logger.warning(
+                        f"LLM returned unknown scenario '{llm_scenario}', ignored; "
+                        f"keeping regex scenario '{scenario}'"
+                    )
+                # LLM может не вернуть REQ-идентификаторы — добавляем из регулярки.
+                regex_ids = re.findall(r"REQ-\d+", state.user_query.upper())
+                merged = list(dict.fromkeys(list(requirement_ids) + llm_req_ids + regex_ids))
+                requirement_ids = merged
+                if span is not None:
+                    span.set_attribute("router.method", "llm")
+            except Exception as e:
+                logger.warning(f"LLM routing failed, using regex fallback: {e}")
+                if span is not None:
+                    span.set_attribute("router.method", "regex")
+        else:
             if span is not None:
-                span.set_attribute("router.method", "llm")
-        except Exception as e:
-            logger.warning(f"LLM routing failed, using regex fallback: {e}")
-            if span is not None:
-                span.set_attribute("router.method", "regex")
+                span.set_attribute("router.method", "regex-disabled")
 
         agents_map = {
             "full_review": ["coverage", "design", "standards"],

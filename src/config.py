@@ -30,6 +30,18 @@ class Settings(BaseSettings):
     embedding_timeout_seconds: int = 30
     llm_retry_attempts: int = 3
 
+    # Переключатели избыточных LLM-вызовов (revью §2/§3, Этап 3).
+    # router_llm_enabled: роутер-LLM избыточен (его scenario отбрасывается,
+    #   REQ-IDs и так даёт regex). По умолчанию True (поведение сохранено),
+    #   False => чистый детерминированный роутинг без LLM-вызова.
+    router_llm_enabled: bool = True
+    # rag_enabled: RAG fan-out в Coverage дублирует результат SQL req->test.
+    #   По умолчанию True (поведение сохранено); False => только SQL-маппинг.
+    rag_enabled: bool = True
+    # Лимит токенов вывода для Standards-чанков (T4): вместо общего 16384,
+    # чтобы модель не дампила огромный список violations.
+    standards_max_tokens: int = 4096
+
     # Пороги бизнес-логики агентов.
     agents_chunk_size: int = 50
     sql_max_rows: int = 1000

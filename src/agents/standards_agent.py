@@ -153,6 +153,7 @@ def _analyze_chunk(chunk_data: list[dict], llm: RouterAIProvider, settings: Sett
             {"role": "user", "content": user_msg},
         ],
         model=settings.model_senior,
+        max_tokens=settings.standards_max_tokens,
         response_format={
             "type": "json_schema",
             "json_schema": {
