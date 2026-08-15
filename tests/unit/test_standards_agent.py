@@ -2,10 +2,33 @@
 
 import json
 
+import pytest
+
 from src.agents.standards_agent import num_active_rules, run_standards_agent
 from src.models import TestCase as QATestCase
 
 from tests.integration.helpers import ScriptedLLM, apply_llm_patch
+
+
+@pytest.fixture(autouse=True)
+def _clear_agent_caches():
+    """Снимает протечку lru-кэшей между тестами.
+
+    ``run_standards_agent`` наполняет ``rule_classification``/``num_active_rules``
+    кэш по мокнутому ``load_standards_rules``; без очистки после теста кэш
+    протекает в соседние тесты (test_prompts). Предсуществующий баг изоляции.
+    """
+    import src.agents.standards_agent as sa
+
+    yield
+    # rule_classification/num_active_rules — lru_cache, именно они протекают
+    # между тестами (test_prompts). load_standards_rules очищаем с защитой:
+    # в момент teardown он может быть ещё мокнут (lambda без cache_clear).
+    for fn in (sa.rule_classification, sa.num_active_rules, sa.load_standards_rules):
+        try:
+            fn.cache_clear()
+        except AttributeError:
+            pass
 
 
 def _make_tcs(n: int) -> list[QATestCase]:

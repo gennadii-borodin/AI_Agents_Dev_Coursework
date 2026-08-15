@@ -17,6 +17,17 @@ def get_connection() -> psycopg.Connection:
 
 MAX_SQL_ROWS = 1000
 
+# Явная проекция колонок БЕЗ embedding-вектора (vector(1536)): исключаем
+# многомегабайтный мусорный payload из каждого SELECT (T2, §4 ревью).
+REQUIREMENT_COLS = (
+    "requirement_id, title, requirement_text, category, priority, "
+    "qa_requirements_review, rejection_reason"
+)
+TEST_CASE_COLS = (
+    "test_case_id, req, title, description, preconditions, test_data, steps, "
+    "expected_result, priority, test_type, design_quality, qa_review, review_comment"
+)
+
 
 def execute_sql(query: str, params: Optional[list] = None, settings: Optional[Settings] = None) -> dict[str, Any]:
     if settings is None:
@@ -56,12 +67,12 @@ def execute_sql(query: str, params: Optional[list] = None, settings: Optional[Se
 
 
 def get_all_requirements() -> list[dict[str, Any]]:
-    result = execute_sql("SELECT * FROM requirements ORDER BY requirement_id")
+    result = execute_sql(f"SELECT {REQUIREMENT_COLS} FROM requirements ORDER BY requirement_id")
     return result["results"] if result["error"] is None else []
 
 
 def get_all_test_cases() -> list[dict[str, Any]]:
-    result = execute_sql("SELECT * FROM test_cases ORDER BY test_case_id")
+    result = execute_sql(f"SELECT {TEST_CASE_COLS} FROM test_cases ORDER BY test_case_id")
     return result["results"] if result["error"] is None else []
 
 
@@ -69,13 +80,13 @@ def get_requirements_by_ids(requirement_ids: list[str]) -> list[dict[str, Any]]:
     if not requirement_ids:
         return []
     placeholders = ",".join(["%s"] * len(requirement_ids))
-    query = f"SELECT * FROM requirements WHERE requirement_id IN ({placeholders}) ORDER BY requirement_id"
+    query = f"SELECT {REQUIREMENT_COLS} FROM requirements WHERE requirement_id IN ({placeholders}) ORDER BY requirement_id"
     result = execute_sql(query, requirement_ids)
     return result["results"] if result["error"] is None else []
 
 
 def get_test_cases_by_req(requirement_id: str) -> list[dict[str, Any]]:
-    query = "SELECT * FROM test_cases WHERE req = %s ORDER BY test_case_id"
+    query = f"SELECT {TEST_CASE_COLS} FROM test_cases WHERE req = %s ORDER BY test_case_id"
     result = execute_sql(query, [requirement_id])
     return result["results"] if result["error"] is None else []
 
@@ -89,13 +100,13 @@ def get_test_cases_by_reqs(requirement_ids: list[str]) -> list[dict[str, Any]]:
     if not requirement_ids:
         return []
     placeholders = ",".join(["%s"] * len(requirement_ids))
-    query = f"SELECT * FROM test_cases WHERE req IN ({placeholders}) ORDER BY test_case_id"
+    query = f"SELECT {TEST_CASE_COLS} FROM test_cases WHERE req IN ({placeholders}) ORDER BY test_case_id"
     result = execute_sql(query, list(requirement_ids))
     return result["results"] if result["error"] is None else []
 
 
 def get_tests_without_requirements() -> list[dict[str, Any]]:
-    query = "SELECT * FROM test_cases WHERE req IS NULL OR req = '' ORDER BY test_case_id"
+    query = f"SELECT {TEST_CASE_COLS} FROM test_cases WHERE req IS NULL OR req = '' ORDER BY test_case_id"
     result = execute_sql(query)
     return result["results"] if result["error"] is None else []
 

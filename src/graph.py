@@ -135,6 +135,8 @@ def run_coverage_node(state: ReviewState) -> ReviewState:
     state.current_step = "coverage"
     report = run_coverage_agent(
         requirement_ids=state.requirement_ids,
+        requirements=state.requirements or None,
+        test_cases=state.test_cases or None,
     )
     state.coverage_report = report
     return state
@@ -145,6 +147,8 @@ def run_design_node(state: ReviewState) -> ReviewState:
     state.current_step = "design"
     report = run_design_agent(
         requirement_ids=state.requirement_ids,
+        requirements=state.requirements or None,
+        test_cases=state.test_cases or None,
     )
     state.design_report = report
     return state
@@ -155,6 +159,7 @@ def run_standards_node(state: ReviewState) -> ReviewState:
     state.current_step = "standards"
     report = run_standards_agent(
         requirement_ids=state.requirement_ids,
+        test_cases=state.test_cases or None,
     )
     state.standards_report = report
     return state
@@ -166,10 +171,34 @@ def run_find_unlinked_node(state: ReviewState) -> ReviewState:
     registry = ToolRegistry()
     result = registry.execute(
         "sql_query",
-        {"query": "SELECT * FROM test_cases WHERE req IS NULL OR req = '' ORDER BY test_case_id"},
+        {
+            "query": (
+                "SELECT test_case_id, req, title, description, preconditions, test_data, steps, "
+                "expected_result, priority, test_type, design_quality, qa_review, review_comment "
+                "FROM test_cases WHERE req IS NULL OR req = '' ORDER BY test_case_id"
+            )
+        },
     )
     unlinked = result.get("results", []) if isinstance(result, dict) else []
     state.sql_results["unlinked_tests"] = unlinked
+    return state
+
+
+def load_data_once(state: ReviewState, settings: Optional[Settings] = None) -> ReviewState:
+    """Однократная выгрузка требований и ТК в state (T3, §3 ревью).
+
+    Устраняет тройную полную выгрузку БД агентами: данные грузятся 1× здесь,
+    далее агенты читают из ``state.requirements`` / ``state.test_cases``.
+    """
+    if settings is None:
+        settings = get_settings()
+    from src.models import Requirement, TestCase
+    from src.tools.sql_tool import get_all_requirements, get_all_test_cases
+
+    if not state.requirements:
+        state.requirements = [Requirement(**r) for r in get_all_requirements()]
+    if not state.test_cases:
+        state.test_cases = [TestCase(**t) for t in get_all_test_cases()]
     return state
 
 
@@ -177,15 +206,17 @@ def build_graph(checkpointer=None) -> StateGraph:
     workflow = StateGraph(ReviewState)
 
     workflow.add_node("router", route_request)
+    workflow.add_node("load_data_once", load_data_once)
     workflow.add_node("coverage", run_coverage_node)
     workflow.add_node("design", run_design_node)
     workflow.add_node("standards", run_standards_node)
     workflow.add_node("find_unlinked", run_find_unlinked_node)
 
     workflow.set_entry_point("router")
+    workflow.add_edge("router", "load_data_once")
 
     workflow.add_conditional_edges(
-        "router",
+        "load_data_once",
         lambda state: state.scenario if state.scenario in KNOWN_SCENARIOS else "coverage_review",
         {
             "full_review": "coverage",

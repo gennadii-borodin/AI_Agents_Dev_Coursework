@@ -47,6 +47,18 @@ def num_active_rules() -> int:
 
 STANDARDS_SYSTEM_PROMPT = build_agent_system_prompt("standards_agent")
 
+# Единый источник правил QA-TEST — data/standards_rules.yaml (T7, §1.3 ревью).
+# Инжектируем актуальные правила в системный промпт, чтобы исключить
+# дублирование/рассинхрон с hardcoded-текстом в prompts/standards_agent.yaml.
+_STANDARDS_RULES_TEXT = yaml.safe_dump(
+    load_standards_rules().get("rules", []), allow_unicode=True, sort_keys=False
+)
+STANDARDS_SYSTEM_PROMPT = (
+    STANDARDS_SYSTEM_PROMPT
+    + "\n\n## Действующие правила QA-TEST (источник: data/standards_rules.yaml):\n"
+    + _STANDARDS_RULES_TEXT
+)
+
 
 def _prepare_test_cases_data(test_cases: list[dict]) -> list[dict]:
     result = []
