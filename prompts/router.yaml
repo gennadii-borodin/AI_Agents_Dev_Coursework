@@ -32,3 +32,6 @@ input_schema:
 output_schema:
   scenario: string
   requirement_ids: optional[list]
+
+response_json: |
+  {"scenario": "full_review", "requirement_ids": ["REQ-001"]}

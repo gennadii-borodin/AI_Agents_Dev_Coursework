@@ -1,14 +1,12 @@
-import os
-import sys
 import logging
+import sys
 
 import click
 
+from src.report import run_review
 from src.tracing import init_phoenix
 
 phoenix_ok = init_phoenix(project_name="qa-review")
-
-from src.report import run_review
 
 logging.basicConfig(
     level=logging.INFO,

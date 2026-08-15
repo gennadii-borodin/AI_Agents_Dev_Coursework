@@ -1,3 +1,4 @@
+import json
 import logging
 import re
 from typing import Optional
@@ -15,6 +16,46 @@ from src.skills import ToolRegistry
 logger = logging.getLogger(__name__)
 
 
+def _regex_route(query: str) -> tuple[str, list[str]]:
+    """Детерминированный запасной роутинг (используется при сбое LLM)."""
+    q = query.lower()
+    requirement_ids = re.findall(r"REQ-\d+", query.upper())
+
+    scenario = "full_review"
+    if any(w in q for w in ["покрытие", "coverage", "req-"]):
+        scenario = "requirement_coverage" if requirement_ids else "coverage_review"
+    elif any(w in q for w in ["дизайн", "design", "качество"]):
+        scenario = "design_review"
+    elif any(w in q for w in ["стандарт", "standard", "соответстви"]):
+        scenario = "standards_review"
+    elif any(w in q for w in ["без требован", "unlinked", "без req"]):
+        scenario = "find_unlinked_tests"
+    elif any(w in q for w in ["полное", "full", "всё", "комплексн"]):
+        scenario = "full_review"
+    return scenario, requirement_ids
+
+
+def _llm_route(query: str, llm: RouterAIProvider, settings: Settings) -> tuple[str, list[str]]:
+    """Классификация запроса LLM-роутером (prompts/router.yaml)."""
+    from src.prompts import build_agent_system_prompt
+
+    system = build_agent_system_prompt("router")
+    user = f"Классифицируй запрос пользователя:\n{query}"
+    response = llm.chat_completion(
+        messages=[
+            {"role": "system", "content": system},
+            {"role": "user", "content": user},
+        ],
+        model=settings.model_junior,
+        temperature=0.0,
+        json_mode=True,
+    )
+    data = json.loads(response)
+    scenario = (data.get("scenario") or "full_review").strip()
+    requirement_ids = [str(r) for r in (data.get("requirement_ids") or [])]
+    return scenario, requirement_ids
+
+
 def route_request(state: ReviewState, settings: Optional[Settings] = None) -> ReviewState:
     from src.tracing import set_span_output, trace_agent
 
@@ -24,24 +65,21 @@ def route_request(state: ReviewState, settings: Optional[Settings] = None) -> Re
     with trace_agent("Router", **{"agent.type": "router"}) as span:
         llm = RouterAIProvider(settings)
 
-        query = state.user_query.lower()
-
-        requirement_ids = re.findall(r"REQ-\d+", query.upper())
-
-        scenario = "full_review"
-        if any(w in query for w in ["покрытие", "coverage", "req-"]):
-            if requirement_ids:
-                scenario = "requirement_coverage"
-            else:
-                scenario = "coverage_review"
-        elif any(w in query for w in ["дизайн", "design", "качество"]):
-            scenario = "design_review"
-        elif any(w in query for w in ["стандарт", "standard", "соответстви"]):
-            scenario = "standards_review"
-        elif any(w in query for w in ["без требован", "unlinked", "без req"]):
-            scenario = "find_unlinked_tests"
-        elif any(w in query for w in ["полное", "full", "всё", "комплексн"]):
-            scenario = "full_review"
+        scenario, requirement_ids = _regex_route(state.user_query)
+        try:
+            llm_scenario, llm_req_ids = _llm_route(state.user_query, llm, settings)
+            if llm_scenario:
+                scenario = llm_scenario
+            # LLM может не вернуть REQ-идентификаторы — добавляем из регулярки.
+            regex_ids = re.findall(r"REQ-\d+", state.user_query.upper())
+            merged = list(dict.fromkeys(list(requirement_ids) + llm_req_ids + regex_ids))
+            requirement_ids = merged
+            if span is not None:
+                span.set_attribute("router.method", "llm")
+        except Exception as e:
+            logger.warning(f"LLM routing failed, using regex fallback: {e}")
+            if span is not None:
+                span.set_attribute("router.method", "regex")
 
         agents_map = {
             "full_review": ["coverage", "design", "standards"],
