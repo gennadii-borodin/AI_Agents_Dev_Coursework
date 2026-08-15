@@ -116,9 +116,13 @@ class RouterAIProvider:
                 )
                 response.raise_for_status()
                 data = response.json()
-                content = data["choices"][0]["message"]["content"]
+                content = data["choices"][0]["message"].get("content")
+                if content is None or not str(content).strip():
+                    # Пустой ответ провайдера — бросаем, чтобы tenacity сделал
+                    # повторную попытку (и сработал фоллбэк json_schema -> json_mode).
+                    raise ValueError("LLM provider returned empty content")
                 usage = data.get("usage", {}) or {}
-                return content.strip(), usage
+                return str(content).strip(), usage
         except Exception as e:
             logger.error(f"LLM request failed: {e}")
             raise
