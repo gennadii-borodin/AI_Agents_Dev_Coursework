@@ -189,21 +189,21 @@ def run_standards_agent(
 
     blocking_rule_ids, auto_fix_rule_ids = rule_classification()
     blocking = [
-        f"{v['rule_id']}: {v['description']} in {v['test_case_id']}"
+        f"{v.get('rule_id', '?')}: {v.get('description', '')} in {v.get('test_case_id', '?')}"
         for v in all_violations
-        if v["rule_id"] in blocking_rule_ids
+        if v.get("rule_id") in blocking_rule_ids
     ]
 
     auto_fix = list(set(
-        f"{v['rule_id']}: {v['description']}"
+        f"{v.get('rule_id', '?')}: {v.get('description', '')}"
         for v in all_violations
-        if v["rule_id"] in auto_fix_rule_ids
+        if v.get("rule_id") in auto_fix_rule_ids
     ))
 
     human_review = list(set(
-        f"{v['rule_id']}: {v['description']} in {v['test_case_id']}"
+        f"{v.get('rule_id', '?')}: {v.get('description', '')} in {v.get('test_case_id', '?')}"
         for v in all_violations
-        if v["rule_id"] not in auto_fix_rule_ids
+        if v.get("rule_id") not in auto_fix_rule_ids
     ))
 
     return StandardsReport(

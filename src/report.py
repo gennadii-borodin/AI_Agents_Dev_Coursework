@@ -3,18 +3,15 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from src.agents.coverage_agent import run_coverage_agent
-from src.agents.design_agent import run_design_agent
-from src.agents.standards_agent import run_standards_agent
 from src.config import get_settings
 from src.graph import build_graph
 from src.models import ReviewState
 from src.tracing import (
-    trace_run,
-    trace_tool,
-    set_span_output,
     get_current_session_id,
     get_run_stats,
+    set_span_output,
+    trace_run,
+    trace_tool,
 )
 
 logger = logging.getLogger(__name__)
@@ -60,7 +57,7 @@ def generate_coverage_markdown(report: Any) -> str:
     if report.indirect_coverage:
         lines.append("## Косвенное покрытие\n")
         for item in report.indirect_coverage:
-            lines.append(f"- `{item['requirement_id']}`: {item['reason']}")
+            lines.append(f"- `{item.get('requirement_id', '?')}`: {item.get('reason', '')}")
         lines.append("")
 
     if report.gaps:
@@ -82,7 +79,7 @@ def generate_design_markdown(report: Any) -> str:
         lines.append("| Техника | Покрытие |")
         lines.append("|---------|----------|")
         for t in report.techniques_applied:
-            lines.append(f"| {t['technique']} | {t['coverage']} |")
+            lines.append(f"| {t.get('technique', '?')} | {t.get('coverage', 'n/a')} |")
         lines.append("")
 
     if report.missing_techniques:
@@ -94,13 +91,14 @@ def generate_design_markdown(report: Any) -> str:
     if report.weak_tests:
         lines.append("## Слабые тесты\n")
         for wt in report.weak_tests:
-            lines.append(f"- `{wt['test_case_id']}`: {wt['reason']}")
+            lines.append(f"- `{wt.get('test_case_id', '?')}`: {wt.get('reason', '')}")
         lines.append("")
 
     if report.duplicate_tests:
         lines.append("## Дублирующие тесты\n")
         for dup in report.duplicate_tests:
-            lines.append(f"- `{dup['original']}` дублирует: {', '.join(dup['duplicates'])}")
+            dups = dup.get("duplicates", []) if isinstance(dup, dict) else []
+            lines.append(f"- `{dup.get('original', '?')}` дублирует: {', '.join(dups)}")
         lines.append("")
 
     if report.recommendations:
@@ -122,7 +120,8 @@ def generate_standards_markdown(report: Any) -> str:
         lines.append("|---------|----------|-----------|-------------|")
         for v in report.violations:
             lines.append(
-                f"| {v['rule_id']} | {v['severity']} | {v['test_case_id']} | {v['description']} |"
+                f"| {v.get('rule_id', '?')} | {v.get('severity', '?')} | "
+                f"{v.get('test_case_id', '?')} | {v.get('description', '')} |"
             )
         lines.append("")
 

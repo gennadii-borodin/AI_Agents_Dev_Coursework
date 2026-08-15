@@ -144,6 +144,7 @@ def run_design_agent(
             ],
             model=settings.model_senior,
             temperature=0.1,
+            max_tokens=16384,
             response_format={
                 "type": "json_schema",
                 "json_schema": {
@@ -158,13 +159,7 @@ def run_design_agent(
 
         try:
             data = json.loads(response)
-            # Clean up test_scores if malformed
-            if "test_scores" in data:
-                cleaned_scores = []
-                for ts in data["test_scores"]:
-                    if isinstance(ts, dict) and "test_case_id" in ts:
-                        cleaned_scores.append(ts)
-                data["test_scores"] = cleaned_scores
+            data = _normalize_design(data)
             set_span_output(
                 span,
                 {"overall_score": data.get("overall_score")},
@@ -183,6 +178,7 @@ def run_design_agent(
                     data = repaired
                 else:
                     raise ValueError(f"Unexpected type: {type(repaired)}")
+                data = _normalize_design(data)
                 set_span_output(
                     span,
                     {"overall_score": data.get("overall_score")},
@@ -193,3 +189,39 @@ def run_design_agent(
                 logger.error(f"Failed to repair JSON: {e2}")
                 logger.error(f"Raw response: {response[:500]}")
                 raise
+
+
+def _normalize_design(data: dict) -> dict:
+    """Дозаполняет обязательные ключи, чтобы отчёт рендерился даже при
+    обрезанном/неполном JSON-ответе модели (без KeyError в report.py)."""
+    if not isinstance(data, dict):
+        return {"overall_score": 0.0}
+    data.setdefault("overall_score", 0.0)
+    data["techniques_applied"] = [
+        {
+            "technique": str(t.get("technique", "?")) if isinstance(t, dict) else str(t),
+            "coverage": (t.get("coverage", "n/a") if isinstance(t, dict) else "n/a"),
+        }
+        for t in data.get("techniques_applied", []) or []
+        if isinstance(t, dict) or isinstance(t, str)
+    ]
+    data["weak_tests"] = [
+        {
+            "test_case_id": (t.get("test_case_id", "?") if isinstance(t, dict) else "?"),
+            "reason": (t.get("reason", "") if isinstance(t, dict) else ""),
+        }
+        for t in data.get("weak_tests", []) or []
+        if isinstance(t, dict) or isinstance(t, str)
+    ]
+    data["test_scores"] = [
+        {
+            "test_case_id": (t.get("test_case_id", "?") if isinstance(t, dict) else "?"),
+            "score": (t.get("score", 0.0) if isinstance(t, dict) else 0.0),
+        }
+        for t in data.get("test_scores", []) or []
+        if isinstance(t, dict) and "test_case_id" in t
+    ]
+    data.setdefault("missing_techniques", [])
+    data.setdefault("duplicate_tests", [])
+    data.setdefault("recommendations", [])
+    return data

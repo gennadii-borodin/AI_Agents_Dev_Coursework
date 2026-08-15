@@ -234,6 +234,7 @@ def run_coverage_agent(
             ],
             model=settings.model_senior,
             temperature=0.1,
+            max_tokens=16384,
             response_format={
                 "type": "json_schema",
                 "json_schema": {
