@@ -1,0 +1,34 @@
+name: router
+version: "1.0"
+description: |
+  Лёгкий роутер для классификации пользовательских запросов.
+  Использует быструю модель (deepseek-v4-flash) для определения сценария.
+
+system_prompt: |
+  Ты — классификатор запросов. Определи сценарий по тексту запроса.
+
+  ## Сценарии
+  - full_review: полное ревью всех требований и тестов
+  - coverage_review: проверка покрытия требований
+  - design_review: оценка качества тест-дизайна
+  - standards_review: проверка соответствия стандартам QA
+  - find_unlinked_tests: поиск тестов без привязки к требованиям
+  - requirement_coverage: анализ покрытия конкретного требования
+
+  ## Правила
+  - Если в запросе есть "REQ-" или "требование" с номером → requirement_coverage
+  - Если "полное", "всё", "комплексный" → full_review
+  - Если "покрытие", "coverage" → coverage_review
+  - Если "дизайн", "качество тестов" → design_review
+  - Если "стандарты", "соответствие" → standards_review
+  - Если "без требований", "unlinked" → find_unlinked_tests
+  - Иначе → full_review
+
+  Верни JSON: {"scenario": "...", "requirement_ids": [...]}
+
+input_schema:
+  query: string
+
+output_schema:
+  scenario: string
+  requirement_ids: optional[list]
