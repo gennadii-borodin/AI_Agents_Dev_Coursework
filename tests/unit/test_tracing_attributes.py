@@ -87,3 +87,42 @@ def test_tool_parameters_is_string(memory_exporter):
     tool = next(s for s in spans if s.name == "Tool execute_sql")
     attr = tool.attributes.get("tool.parameters")
     assert isinstance(attr, str), f"tool.parameters must be a string, got {type(attr)}"
+
+
+def test_mask_sensitive_unit():
+    assert tracing.mask_sensitive("password=SuperSecret123") == "password=***"
+    assert tracing.mask_sensitive("api_key: abc.DEF-123456") == "api_key=***"
+    assert tracing.mask_sensitive("contact victim@example.com") == "contact ***"
+    assert tracing.mask_sensitive("card 4111 1111 1111 1111") == "card ***"
+    assert tracing.mask_sensitive(123) == 123
+
+
+def test_secret_masked_in_llm_input(memory_exporter):
+    messages = [
+        {"role": "system", "content": "analyze"},
+        {"role": "user", "content": "password=SuperSecret123 in test_data"},
+    ]
+    with tracing.trace_llm("deepseek/deepseek-v4-pro-0813", messages, 0.1, 100, False) as span:
+        tracing.set_llm_output(span, "email victim@example.com done")
+
+    memory_exporter.force_flush(2000)
+    spans = memory_exporter.get_finished_spans()
+    llm = next(s for s in spans if s.name == "LLM deepseek-v4-pro-0813")
+    joined_in = " ".join(llm.attributes.get("llm.input_messages"))
+    assert "SuperSecret123" not in joined_in
+    assert "password=***" in joined_in
+    joined_out = " ".join(llm.attributes.get("llm.output_messages"))
+    assert "victim@example.com" not in joined_out
+    assert "***" in joined_out
+
+
+def test_secret_masked_in_tool_input(memory_exporter):
+    with tracing.trace_tool("execute_sql", {"query": "SELECT * FROM t WHERE token=abc123XYZ"}):
+        pass
+
+    memory_exporter.force_flush(2000)
+    spans = memory_exporter.get_finished_spans()
+    tool = next(s for s in spans if s.name == "Tool execute_sql")
+    inp = tool.attributes.get(tracing.SpanAttributes.INPUT_VALUE)
+    assert "abc123XYZ" not in inp
+    assert "token=***" in inp

@@ -301,10 +301,14 @@ def run_review(
     agents = []
     saved: dict[str, Path] = {}
     state: ReviewState = ReviewState(user_query=user_query)
+    _run_status = "success"
+    _error_type: Optional[str] = None
     with trace_run(user_query, "pending", []) as run_span:
         try:
             state = graph.invoke(state, config=config)
-        except Exception:
+        except Exception as _exc:
+            _run_status = "error"
+            _error_type = type(_exc).__name__
             logger.exception("Graph run failed mid-execution (thread_id=%s)", thread_id)
             # C2: подхватываем последнее сохранённое состояние (частичные отчёты)
             snapshot = graph.get_state(config)
@@ -321,50 +325,58 @@ def run_review(
             except Exception:
                 logger.exception("Failed to save partial reports after graph run")
 
-        if run_span is not None:
-            def _get(obj, attr, default=None):
-                if isinstance(obj, dict):
-                    return obj.get(attr, default)
-                return getattr(obj, attr, default)
+            # Метрики фиксируются ВСЕГДА (успех и ERROR): дефект из ревью §9 —
+            # ранее блок был недостижим при исключении, и $/токены терялись.
+            try:
+                if run_span is not None:
+                    def _get(obj, attr, default=None):
+                        if isinstance(obj, dict):
+                            return obj.get(attr, default)
+                        return getattr(obj, attr, default)
 
-            scenario = _get(state, "scenario") or "unknown"
-            agents = _get(state, "agents_to_run") or []
-            run_span.set_attribute("qa.scenario", scenario)
-            run_span.set_attribute("qa.agents", ",".join(agents))
-            run_span.set_attribute("qa.requirement_ids", ",".join(_get(state, "requirement_ids") or []))
-            cov = _get(state, "coverage_report")
-            des = _get(state, "design_report")
-            std = _get(state, "standards_report")
-            if cov:
-                run_span.set_attribute("qa.coverage_pct", float(cov.total_coverage))
-            if des:
-                run_span.set_attribute("qa.design_score", float(des.overall_score))
-            if std:
-                run_span.set_attribute("qa.standards_compliance_pct", float(std.compliance_percentage))
-                run_span.set_attribute("qa.violations_count", len(std.violations))
+                    scenario = _get(state, "scenario") or "unknown"
+                    agents = _get(state, "agents_to_run") or []
+                    run_span.set_attribute("qa.run_status", _run_status)
+                    if _error_type:
+                        run_span.set_attribute("qa.error_type", _error_type)
+                    run_span.set_attribute("qa.scenario", scenario)
+                    run_span.set_attribute("qa.agents", ",".join(agents))
+                    run_span.set_attribute("qa.requirement_ids", ",".join(_get(state, "requirement_ids") or []))
+                    cov = _get(state, "coverage_report")
+                    des = _get(state, "design_report")
+                    std = _get(state, "standards_report")
+                    if cov:
+                        run_span.set_attribute("qa.coverage_pct", float(cov.total_coverage))
+                    if des:
+                        run_span.set_attribute("qa.design_score", float(des.overall_score))
+                    if std:
+                        run_span.set_attribute("qa.standards_compliance_pct", float(std.compliance_percentage))
+                        run_span.set_attribute("qa.violations_count", len(std.violations))
 
-            stats = get_run_stats()
-            run_span.set_attribute("qa.llm_calls", stats["llm_calls"])
-            run_span.set_attribute("qa.prompt_tokens", stats["prompt_tokens"])
-            run_span.set_attribute("qa.completion_tokens", stats["completion_tokens"])
-            run_span.set_attribute("qa.total_tokens", stats["prompt_tokens"] + stats["completion_tokens"])
-            pricing = settings.model_pricing
-            est_cost = 0.0
-            for model, toks in stats.get("by_model", {}).items():
-                price = pricing.get(model, {})
-                est_cost += (
-                    toks["prompt"] / 1_000_000 * price.get("input", 0)
-                    + toks["completion"] / 1_000_000 * price.get("output", 0)
-                )
-            run_span.set_attribute("qa.estimated_cost_usd", round(est_cost, 4))
+                    stats = get_run_stats()
+                    run_span.set_attribute("qa.llm_calls", stats["llm_calls"])
+                    run_span.set_attribute("qa.prompt_tokens", stats["prompt_tokens"])
+                    run_span.set_attribute("qa.completion_tokens", stats["completion_tokens"])
+                    run_span.set_attribute("qa.total_tokens", stats["prompt_tokens"] + stats["completion_tokens"])
+                    pricing = settings.model_pricing
+                    est_cost = 0.0
+                    for model, toks in stats.get("by_model", {}).items():
+                        price = pricing.get(model, {})
+                        est_cost += (
+                            toks["prompt"] / 1_000_000 * price.get("input", 0)
+                            + toks["completion"] / 1_000_000 * price.get("output", 0)
+                        )
+                    run_span.set_attribute("qa.estimated_cost_usd", round(est_cost, 4))
 
-            set_span_output(run_span, {
-                "scenario": scenario,
-                "session_id": get_current_session_id(),
-                "agents": agents,
-            }, mime_type="application/json")
+                    set_span_output(run_span, {
+                        "scenario": scenario,
+                        "session_id": get_current_session_id(),
+                        "agents": agents,
+                    }, mime_type="application/json")
 
-            run_span.set_attribute("qa.reports_saved", ",".join(saved.keys()))
+                    run_span.set_attribute("qa.reports_saved", ",".join(saved.keys()))
+            except Exception:
+                logger.exception("Failed to emit run metrics")
 
     print(f"\nOK: Отчёты сохранены в {REPORTS_DIR}")
     for name, path in saved.items():
