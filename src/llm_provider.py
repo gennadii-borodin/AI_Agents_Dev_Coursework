@@ -7,11 +7,14 @@ from tenacity import retry, stop_after_attempt, wait_exponential
 
 from src.config import Settings, get_settings
 from src.tracing import (
-    trace_llm,
+    OTEL_AVAILABLE,
+    set_llm_output,
     set_span_output,
     set_span_tokens,
-    set_llm_output,
-    OTEL_AVAILABLE,
+    trace_llm,
+    trace_tool,
+)
+from src.tracing import (
     otel_trace as _otel_trace,
 )
 
@@ -88,7 +91,7 @@ class RouterAIProvider:
                         model=model,
                     )
                 return content
-            except Exception as e:
+            except Exception:
                 raise
 
     def _do_request(self, payload: dict[str, Any]) -> tuple[str, dict]:
@@ -114,65 +117,98 @@ class RouterAIProvider:
         user_message: str,
         tools: Optional[list[dict[str, Any]]] = None,
         model: Optional[str] = None,
+        max_iterations: int = 5,
+        return_tool_results: bool = False,
+        tool_choice: Any = "auto",
     ) -> str:
+        """LLM с function-calling по скиллам из ToolRegistry.
+
+        Выполняет до ``max_iterations`` раундов вызовов инструментов, прокручивая
+        tool_calls через реестр скиллов. При ``return_tool_results=True`` возвращает
+        сырые результаты инструментов (для извлечения данных агентами), иначе —
+        итоговый ответ ассистента.
+        """
+        from src.skills import ToolRegistry
+
+        if not tools:
+            return self.chat_completion(
+                [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_message},
+                ],
+                model=model,
+            )
+
+        model = model or self.settings.model_senior
+        registry = ToolRegistry()
         messages = [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_message},
         ]
+        tool_results: list[str] = []
+        last_content = ""
 
-        if tools:
+        for _ in range(max_iterations):
             payload: dict[str, Any] = {
-                "model": model or self.settings.model_senior,
+                "model": model,
                 "messages": messages,
                 "tools": tools,
-                "tool_choice": "auto",
+                "tool_choice": tool_choice,
                 "temperature": 0.1,
             }
-
-            with httpx.Client(timeout=self.settings.llm_timeout_seconds) as client:
-                response = client.post(
-                    f"{self.base_url}/chat/completions",
-                    headers=self.headers,
-                    json=payload,
-                )
-                response.raise_for_status()
-                data = response.json()
-
-                tool_calls = data["choices"][0]["message"].get("tool_calls", [])
-                if tool_calls:
-                    results = []
-                    for tool_call in tool_calls:
-                        func = tool_call["function"]
-                        tool_name = func["name"]
-                        tool_args = json.loads(func["arguments"])
-                        tool_result = self._execute_tool(tool_name, tool_args)
-                        results.append(f"Tool {tool_name} result: {tool_result}")
-
-                    messages.append(data["choices"][0]["message"])
-                    for result in results:
-                        messages.append({"role": "tool", "content": result, "tool_call_id": tool_calls[0]["id"]})
-
-                    payload["messages"] = messages
-                    response2 = client.post(
-                        f"{self.base_url}/chat/completions",
-                        headers=self.headers,
-                        json=payload,
+            try:
+                with trace_llm(model, messages, 0.1, self.settings.max_output_tokens, False) as span:
+                    with httpx.Client(timeout=self.settings.llm_timeout_seconds) as client:
+                        response = client.post(
+                            f"{self.base_url}/chat/completions",
+                            headers=self.headers,
+                            json=payload,
+                        )
+                        response.raise_for_status()
+                        data = response.json()
+                    msg = data["choices"][0]["message"]
+                    content = (msg.get("content") or "").strip()
+                    usage = data.get("usage", {}) or {}
+                    if usage:
+                        set_span_tokens(
+                            span,
+                            prompt_tokens=int(usage.get("prompt_tokens") or 0),
+                            completion_tokens=int(usage.get("completion_tokens") or 0),
+                            model=model,
+                        )
+                    set_span_output(
+                        span,
+                        content or f"[tool_calls={len(msg.get('tool_calls') or [])}]",
+                        mime_type="text/plain",
                     )
-                    response2.raise_for_status()
-                    data2 = response2.json()
-                    return data2["choices"][0]["message"]["content"].strip()
+                    set_llm_output(span, content)
 
-                return data["choices"][0]["message"]["content"].strip()
+                    tool_calls = msg.get("tool_calls") or []
+                    if not tool_calls:
+                        if return_tool_results and tool_results:
+                            return "\n".join(tool_results)
+                        return content
+                    last_content = content
+                    messages.append(msg)
+                    for tc in tool_calls:
+                        fn = tc["function"]
+                        try:
+                            args = json.loads(fn.get("arguments") or "{}")
+                        except json.JSONDecodeError:
+                            args = {}
+                        with trace_tool(f"tool:{fn['name']}", {"args": args}) as tspan:
+                            result = registry.execute_to_json(fn["name"], args)
+                            if tspan is not None:
+                                tspan.set_attribute("tool.name", fn["name"])
+                                set_span_output(tspan, result[:2000])
+                        tool_results.append(result)
+                        messages.append(
+                            {"role": "tool", "content": result, "tool_call_id": tc["id"]}
+                        )
+            except Exception as e:
+                logger.error(f"invoke_with_tools failed: {e}")
+                raise
 
-        return self.chat_completion(messages, model=model)
-
-    def _execute_tool(self, tool_name: str, args: dict[str, Any]) -> Any:
-        from src.tools.sql_tool import execute_sql
-        from src.tools.rag_tool import rag_search
-
-        if tool_name == "execute_sql":
-            return execute_sql(args["query"])
-        elif tool_name == "rag_search":
-            return rag_search(args["collection"], args["query"], args.get("top_k", 10))
-        else:
-            return f"Unknown tool: {tool_name}"
+        if return_tool_results and tool_results:
+            return "\n".join(tool_results)
+        return last_content

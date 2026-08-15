@@ -9,7 +9,6 @@ from src.config import Settings, get_settings
 from src.llm_provider import RouterAIProvider
 from src.models import CoverageReport, Requirement, TestCase
 from src.prompts import build_agent_system_prompt
-from src.tools.rag_tool import rag_search
 from src.tools.sql_tool import (
     get_all_requirements,
     get_all_test_cases,
@@ -86,11 +85,17 @@ def run_coverage_agent(
     ) as span:
 
         if requirements is None:
-            req_data = get_requirements_by_ids(requirement_ids) if requirement_ids else get_all_requirements()
+            if requirement_ids:
+                req_data = get_requirements_by_ids(requirement_ids)
+            else:
+                req_data = get_all_requirements()
             requirements = [Requirement(**r) for r in req_data]
 
         if test_cases is None:
-            tc_data = get_test_cases_by_reqs(requirement_ids) if requirement_ids else get_all_test_cases()
+            if requirement_ids:
+                tc_data = get_test_cases_by_reqs(requirement_ids)
+            else:
+                tc_data = get_all_test_cases()
             test_cases = [TestCase(**tc) for tc in tc_data]
 
         if requirement_ids:
@@ -114,12 +119,42 @@ def run_coverage_agent(
         similar_tests_json = "[]"
         try:
             if req_data:
+                from src.skills import ToolRegistry
+
                 combined_req_text = " ".join(
                     f"{r['title']} {r['requirement_text']}" for r in req_data
                 )
-                similar_tests = rag_search(
-                    "test_cases", combined_req_text, top_k=settings.rag_top_k
+                registry = ToolRegistry()
+                rag_tool = next(
+                    t for t in registry.tools if t["function"]["name"] == "rag_search"
                 )
+                similar_tests: list[dict] = []
+                try:
+                    similar_raw = llm.invoke_with_tools(
+                        system_prompt=(
+                            "Используй инструмент rag_search, чтобы найти семантически "
+                            "похожие тест-кейсы по тексту требований."
+                        ),
+                        user_message=(
+                            "Найди похожие тест-кейсы (коллекция test_cases) по тексту "
+                            f"требований:\n{combined_req_text}"
+                        ),
+                        tools=[rag_tool],
+                        model=settings.model_junior,
+                        return_tool_results=True,
+                        tool_choice={"type": "function", "function": {"name": "rag_search"}},
+                    )
+                    similar_tests = json.loads(similar_raw)
+                except Exception as e:
+                    logger.warning(f"invoke_with_tools rag_search failed, using registry: {e}")
+                    similar_tests = registry.execute(
+                        "rag_search",
+                        {
+                            "collection": "test_cases",
+                            "query": combined_req_text,
+                            "top_k": settings.rag_top_k,
+                        },
+                    )
                 similar_tests_json = json.dumps(
                     [
                         {
@@ -145,7 +180,8 @@ def run_coverage_agent(
 ## Тесты без требований (req пуст или null):
 {json.dumps(tests_without_requirements, ensure_ascii=False)}
 
-## Семантически похожие тест-кейсы (возможно покрывающие требования косвенно, без явной привязки REQ):
+## Семантически похожие тест-кейсы
+## (возможно покрывающие требования косвенно, без явной привязки REQ):
 {similar_tests_json}
 
 Верни отчёт о покрытии в формате JSON."""
@@ -167,7 +203,11 @@ def run_coverage_agent(
 
         try:
             data = json.loads(response)
-            set_span_output(span, {"total_coverage": data.get("total_coverage")}, mime_type="application/json")
+            set_span_output(
+                span,
+                {"total_coverage": data.get("total_coverage")},
+                mime_type="application/json",
+            )
             return CoverageReport(**data)
         except json.JSONDecodeError:
             if span is not None:
@@ -180,7 +220,11 @@ def run_coverage_agent(
                     data = repaired
                 else:
                     raise ValueError(f"Unexpected type: {type(repaired)}")
-                set_span_output(span, {"total_coverage": data.get("total_coverage")}, mime_type="application/json")
+                set_span_output(
+                    span,
+                    {"total_coverage": data.get("total_coverage")},
+                    mime_type="application/json",
+                )
                 return CoverageReport(**data)
             except Exception as e2:
                 logger.error(f"Failed to repair JSON: {e2}")

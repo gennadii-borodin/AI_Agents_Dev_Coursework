@@ -125,7 +125,10 @@ def run_standards_agent(
     ) as span:
 
         if test_cases is None:
-            tc_data = get_test_cases_by_reqs(requirement_ids) if requirement_ids else get_all_test_cases()
+            if requirement_ids:
+                tc_data = get_test_cases_by_reqs(requirement_ids)
+            else:
+                tc_data = get_all_test_cases()
             test_cases = [TestCase(**tc) for tc in tc_data]
 
         if requirement_ids:
@@ -142,7 +145,8 @@ def run_standards_agent(
 
         for i in range(0, len(tc_dicts), CHUNK_SIZE):
             chunk = tc_dicts[i:i + CHUNK_SIZE]
-            logger.info(f"Analyzing standards chunk {i // CHUNK_SIZE + 1}/{(len(tc_dicts) + CHUNK_SIZE - 1) // CHUNK_SIZE}")
+            chunk_total = (len(tc_dicts) + CHUNK_SIZE - 1) // CHUNK_SIZE
+            logger.info(f"Analyzing standards chunk {i // CHUNK_SIZE + 1}/{chunk_total}")
             chunk_violations = _analyze_chunk(chunk, llm, settings)
             all_violations.extend(chunk_violations)
 
@@ -163,16 +167,17 @@ def run_standards_agent(
         if v["rule_id"] == "QA-TEST-010"
     ]
 
+    _auto_fix_rules = {"QA-TEST-002", "QA-TEST-004", "QA-TEST-005", "QA-TEST-006", "QA-TEST-009"}
     auto_fix = list(set(
         f"{v['rule_id']}: {v['description']}"
         for v in all_violations
-        if v["rule_id"] in {"QA-TEST-002", "QA-TEST-004", "QA-TEST-005", "QA-TEST-006", "QA-TEST-009"}
+        if v["rule_id"] in _auto_fix_rules
     ))
 
     human_review = list(set(
         f"{v['rule_id']}: {v['description']} in {v['test_case_id']}"
         for v in all_violations
-        if v["rule_id"] not in {"QA-TEST-002", "QA-TEST-004", "QA-TEST-005", "QA-TEST-006", "QA-TEST-009"}
+        if v["rule_id"] not in _auto_fix_rules
     ))
 
     return StandardsReport(

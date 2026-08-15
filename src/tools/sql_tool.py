@@ -5,7 +5,7 @@ import psycopg
 from psycopg.rows import dict_row
 
 from src.config import Settings, get_settings
-from src.tracing import trace_tool, set_span_output
+from src.tracing import set_span_output, trace_tool
 
 logger = logging.getLogger(__name__)
 
@@ -13,6 +13,9 @@ logger = logging.getLogger(__name__)
 def get_connection() -> psycopg.Connection:
     settings = get_settings()
     return psycopg.connect(settings.database_url, row_factory=dict_row)
+
+
+MAX_SQL_ROWS = 1000
 
 
 def execute_sql(query: str, params: Optional[list] = None, settings: Optional[Settings] = None) -> dict[str, Any]:
@@ -34,14 +37,18 @@ def execute_sql(query: str, params: Optional[list] = None, settings: Optional[Se
                     else:
                         cur.execute(query)
                     rows = cur.fetchall()
+                    # Ограничение из скилла sql_query.yaml: максимум 1000 строк.
+                    truncated = len(rows) > MAX_SQL_ROWS
+                    rows = rows[:MAX_SQL_ROWS]
                     result = {
                         "results": [dict(row) for row in rows],
                         "row_count": len(rows),
+                        "truncated": truncated,
                         "error": None,
                     }
                     if span is not None:
                         span.set_attribute("sql.row_count", len(rows))
-                    set_span_output(span, {"row_count": len(rows)})
+                    set_span_output(span, {"row_count": len(rows), "truncated": truncated})
                     return result
     except Exception as e:
         logger.error(f"SQL query failed: {e}")

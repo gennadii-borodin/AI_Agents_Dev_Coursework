@@ -1,7 +1,6 @@
-import json
 import logging
 import re
-from typing import Any, Optional
+from typing import Optional
 
 from langgraph.graph import END, StateGraph
 
@@ -11,17 +10,13 @@ from src.agents.standards_agent import run_standards_agent
 from src.config import Settings, get_settings
 from src.llm_provider import RouterAIProvider
 from src.models import ReviewState
-from src.tools.sql_tool import (
-    get_all_requirements,
-    get_all_test_cases,
-    get_tests_without_requirements,
-)
+from src.skills import ToolRegistry
 
 logger = logging.getLogger(__name__)
 
 
 def route_request(state: ReviewState, settings: Optional[Settings] = None) -> ReviewState:
-    from src.tracing import trace_agent, set_span_output
+    from src.tracing import set_span_output, trace_agent
 
     if settings is None:
         settings = get_settings()
@@ -114,7 +109,12 @@ def run_standards_node(state: ReviewState) -> ReviewState:
 def run_find_unlinked_node(state: ReviewState) -> ReviewState:
     logger.info("Finding unlinked tests")
     state.current_step = "find_unlinked_tests"
-    unlinked = get_tests_without_requirements()
+    registry = ToolRegistry()
+    result = registry.execute(
+        "sql_query",
+        {"query": "SELECT * FROM test_cases WHERE req IS NULL OR req = '' ORDER BY test_case_id"},
+    )
+    unlinked = result.get("results", []) if isinstance(result, dict) else []
     state.sql_results["unlinked_tests"] = unlinked
     return state
 

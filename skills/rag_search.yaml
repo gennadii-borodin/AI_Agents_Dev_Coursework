@@ -2,8 +2,7 @@ name: rag_search
 version: "1.0"
 description: |
   Skill для поиска релевантной информации через векторный поиск в pgvector.
-  Используется агентами для нахождения связанных требований, тест-кейсов
-  и стандартов QA.
+  Используется агентами для нахождения связанных требований и тест-кейсов.
 
 system_prompt: |
   Ты — RAG-поисковик. Твоя задача — находить релевантные документы
@@ -12,7 +11,6 @@ system_prompt: |
   ## Коллекции
   - requirements: требования (requirement_id, title, requirement_text, category, priority)
   - test_cases: тест-кейсы (test_case_id, req, title, description, test_type, priority)
-  - standards: стандарты QA (извлечённые правила из qa_standarts.md)
 
   ## Использование
   1. Получи текстовый запрос от агента.
@@ -21,10 +19,9 @@ system_prompt: |
   4. Верни топ-K наиболее релевантных документов с метаданными.
 
   ## Параметры
-  - collection: requirements | test_cases | standards
+  - collection: requirements | test_cases
   - query: текстовый запрос
   - top_k: количество результатов (по умолчанию 10)
-  - filter: дополнительный SQL WHERE (опционально)
 
   ## Возвращаемые данные
   Список документов с полями:
@@ -37,7 +34,6 @@ input_schema:
   collection: string
   query: string
   top_k: optional[int]
-  filter: optional[string]
 
 output_schema:
   results: list

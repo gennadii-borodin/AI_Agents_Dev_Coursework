@@ -66,8 +66,14 @@ def _prepare_test_cases_data(test_cases: list[dict]) -> list[dict]:
             "type": tc["test_type"],
             "quality": tc["design_quality"],
             "review": tc["qa_review"],
-            "precond_empty": not tc.get("preconditions") or tc["preconditions"].strip() in ("", "Не определены"),
-            "data_empty": not tc.get("test_data") or tc["test_data"].strip() in ("", "Не определены"),
+            "precond_empty": (
+                not tc.get("preconditions")
+                or tc["preconditions"].strip() in ("", "Не определены")
+            ),
+            "data_empty": (
+                not tc.get("test_data")
+                or tc["test_data"].strip() in ("", "Не определены")
+            ),
         })
     return result
 
@@ -92,11 +98,17 @@ def run_design_agent(
     ) as span:
 
         if requirements is None:
-            req_data = get_requirements_by_ids(requirement_ids) if requirement_ids else get_all_requirements()
+            if requirement_ids:
+                req_data = get_requirements_by_ids(requirement_ids)
+            else:
+                req_data = get_all_requirements()
             requirements = [Requirement(**r) for r in req_data]
 
         if test_cases is None:
-            tc_data = get_test_cases_by_reqs(requirement_ids) if requirement_ids else get_all_test_cases()
+            if requirement_ids:
+                tc_data = get_test_cases_by_reqs(requirement_ids)
+            else:
+                tc_data = get_all_test_cases()
             test_cases = [TestCase(**tc) for tc in tc_data]
 
         if requirement_ids:
@@ -147,7 +159,11 @@ def run_design_agent(
                     if isinstance(ts, dict) and "test_case_id" in ts:
                         cleaned_scores.append(ts)
                 data["test_scores"] = cleaned_scores
-            set_span_output(span, {"overall_score": data.get("overall_score")}, mime_type="application/json")
+            set_span_output(
+                span,
+                {"overall_score": data.get("overall_score")},
+                mime_type="application/json",
+            )
             return DesignReport(**data)
         except json.JSONDecodeError as e:
             logger.warning(f"JSON parse error, attempting repair: {e}")
@@ -161,7 +177,11 @@ def run_design_agent(
                     data = repaired
                 else:
                     raise ValueError(f"Unexpected type: {type(repaired)}")
-                set_span_output(span, {"overall_score": data.get("overall_score")}, mime_type="application/json")
+                set_span_output(
+                    span,
+                    {"overall_score": data.get("overall_score")},
+                    mime_type="application/json",
+                )
                 return DesignReport(**data)
             except Exception as e2:
                 logger.error(f"Failed to repair JSON: {e2}")
