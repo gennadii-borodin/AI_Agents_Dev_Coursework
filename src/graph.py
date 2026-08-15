@@ -4,6 +4,7 @@ import re
 from typing import Optional
 
 from langgraph.graph import END, StateGraph
+from langgraph.types import Send
 
 from src.agents.coverage_agent import run_coverage_agent
 from src.agents.design_agent import run_design_agent
@@ -84,7 +85,7 @@ def route_request(state: ReviewState, settings: Optional[Settings] = None) -> Re
                 # LLM используется только для извлечения requirement_ids; его
                 # scenario игнорируется (защита от prompt-injection/переопределения — M2).
                 # Невалидный scenario от LLM не должен попасть в state (защита C1).
-                if llm_scenario and llm_scenario not in KNOWN_SCENARI:
+                if llm_scenario and llm_scenario not in KNOWN_SCENARIOS:
                     logger.warning(
                         f"LLM returned unknown scenario '{llm_scenario}', ignored; "
                         f"keeping regex scenario '{scenario}'"
@@ -126,49 +127,48 @@ def route_request(state: ReviewState, settings: Optional[Settings] = None) -> Re
         return state
 
 
-def _route_next(state: ReviewState) -> str:
-    """Передаёт управление следующему агенту из agents_to_run (в каноническом порядке)."""
-    plan = [a for a in ("coverage", "design", "standards") if a in (state.agents_to_run or [])]
-    current = state.current_step
-    if current not in plan:
-        return END
-    idx = plan.index(current)
-    return plan[idx + 1] if idx + 1 < len(plan) else END
+def _fan_out(state: ReviewState) -> list:
+    """Параллельный fan-out независимых агентов через Send API (revью §1/T2).
+
+    Независимые агенты (coverage/design/standards) запускаются одновременно
+    вместо последовательной цепочки. Каждый узел пишет ТОЛЬКО свой report-ключ,
+    поэтому параллельные записи в state не пересекаются — гонки исключены.
+    Сценарий ``find_unlinked_tests`` не имеет агентов в плане, поэтому
+    маршрутизируется на отдельный узел.
+    """
+    if state.scenario == "find_unlinked_tests":
+        return [Send("find_unlinked", state)]
+    branch_order = ("coverage", "design", "standards")
+    return [Send(name, state) for name in branch_order if name in (state.agents_to_run or [])]
 
 
-def run_coverage_node(state: ReviewState) -> ReviewState:
+def run_coverage_node(state: ReviewState) -> dict:
     logger.info("Running Coverage Agent")
-    state.current_step = "coverage"
     report = run_coverage_agent(
         requirement_ids=state.requirement_ids,
         requirements=state.requirements or None,
         test_cases=state.test_cases or None,
     )
-    state.coverage_report = report
-    return state
+    return {"coverage_report": report}
 
 
-def run_design_node(state: ReviewState) -> ReviewState:
+def run_design_node(state: ReviewState) -> dict:
     logger.info("Running Design Agent")
-    state.current_step = "design"
     report = run_design_agent(
         requirement_ids=state.requirement_ids,
         requirements=state.requirements or None,
         test_cases=state.test_cases or None,
     )
-    state.design_report = report
-    return state
+    return {"design_report": report}
 
 
-def run_standards_node(state: ReviewState) -> ReviewState:
+def run_standards_node(state: ReviewState) -> dict:
     logger.info("Running Standards Agent")
-    state.current_step = "standards"
     report = run_standards_agent(
         requirement_ids=state.requirement_ids,
         test_cases=state.test_cases or None,
     )
-    state.standards_report = report
-    return state
+    return {"standards_report": report}
 
 
 def run_find_unlinked_node(state: ReviewState) -> ReviewState:
@@ -208,6 +208,16 @@ def load_data_once(state: ReviewState, settings: Optional[Settings] = None) -> R
     return state
 
 
+def finalize(state: ReviewState) -> ReviewState:
+    """Точка сбора после параллельного fan-out агентов (revью §1/T2).
+
+    Место для будущей QA-валидации/итоговой свёртки; пока — точка
+    конвергенции веток перед END.
+    """
+    logger.info("Finalizing review")
+    return state
+
+
 def build_graph(checkpointer=None) -> StateGraph:
     workflow = StateGraph(ReviewState)
 
@@ -217,34 +227,20 @@ def build_graph(checkpointer=None) -> StateGraph:
     workflow.add_node("design", run_design_node)
     workflow.add_node("standards", run_standards_node)
     workflow.add_node("find_unlinked", run_find_unlinked_node)
+    workflow.add_node("finalize", finalize)
 
     workflow.set_entry_point("router")
     workflow.add_edge("router", "load_data_once")
 
-    workflow.add_conditional_edges(
-        "load_data_once",
-        lambda state: state.scenario if state.scenario in KNOWN_SCENARIOS else "coverage_review",
-        {
-            "full_review": "coverage",
-            "coverage_review": "coverage",
-            "design_review": "design",
-            "standards_review": "standards",
-            "requirement_coverage": "coverage",
-            "find_unlinked_tests": "find_unlinked",
-        },
-    )
+    # Параллельный fan-out независимых агентов через Send API (T2, §1 ревью).
+    # Каждый агент пишет только свой report-ключ — параллельные записи
+    # не пересекаются, гонки исключены. Ветки сходятся в finalize -> END.
+    workflow.add_conditional_edges("load_data_once", _fan_out)
 
-    # Агенты в цепочке определяются state.agents_to_run (а не жёстко заданы),
-    # поэтому трасса соответствует metadata qa.agents и не запускает лишних агентов.
-    agent_targets = {
-        "coverage": "coverage",
-        "design": "design",
-        "standards": "standards",
-        END: END,
-    }
-    workflow.add_conditional_edges("coverage", _route_next, agent_targets)
-    workflow.add_conditional_edges("design", _route_next, agent_targets)
-    workflow.add_conditional_edges("standards", _route_next, agent_targets)
-    workflow.add_edge("find_unlinked", END)
+    workflow.add_edge("coverage", "finalize")
+    workflow.add_edge("design", "finalize")
+    workflow.add_edge("standards", "finalize")
+    workflow.add_edge("find_unlinked", "finalize")
+    workflow.add_edge("finalize", END)
 
     return workflow.compile(checkpointer=checkpointer)

@@ -41,6 +41,9 @@ class Settings(BaseSettings):
     # Лимит токенов вывода для Standards-чанков (T4): вместо общего 16384,
     # чтобы модель не дампила огромный список violations.
     standards_max_tokens: int = 4096
+    # Верхняя граница числа чанковых итераций Standards-агента (revью T4,
+    # защита от runaway-циклов при сбое пагинации): 0/отрицательное = без лимита.
+    standards_max_iterations: int = 200
 
     # Пороги бизнес-логики агентов.
     agents_chunk_size: int = 50

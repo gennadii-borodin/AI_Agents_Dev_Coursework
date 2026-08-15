@@ -210,17 +210,26 @@ def run_standards_agent(
             span.set_attribute("chunk_size", chunk_size)
 
         all_violations = []
+        chunk_total = (len(tc_dicts) + chunk_size - 1) // chunk_size
+        max_iter = settings.standards_max_iterations
+        iteration = 0
 
         for i in range(0, len(tc_dicts), chunk_size):
+            # Защита от runaway-цикла (revью T4): жёсткий потолок итераций.
+            if max_iter and max_iter > 0 and iteration >= max_iter:
+                logger.warning(
+                    f"Standards analysis reached max_iterations={max_iter}, stopping early"
+                )
+                break
             chunk = tc_dicts[i:i + chunk_size]
-            chunk_total = (len(tc_dicts) + chunk_size - 1) // chunk_size
-            logger.info(f"Analyzing standards chunk {i // chunk_size + 1}/{chunk_total}")
+            logger.info(f"Analyzing standards chunk {iteration + 1}/{chunk_total}")
             chunk_violations = _analyze_chunk(chunk, llm, settings)
             all_violations.extend(chunk_violations)
+            iteration += 1
 
         num_rules = num_active_rules()
         if span is not None:
-            span.set_attribute("chunks.total", (len(tc_dicts) + chunk_size - 1) // chunk_size)
+            span.set_attribute("chunks.total", chunk_total)
             span.set_attribute("violations.total", len(all_violations))
             if num_rules > 0 and test_cases:
                 denom = len(test_cases) * num_rules
