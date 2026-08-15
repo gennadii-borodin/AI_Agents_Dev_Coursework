@@ -1,42 +1,21 @@
 import json
 import logging
 import re
-from typing import Any, Optional
+from typing import Optional
 
 import json_repair
 
 from src.config import Settings, get_settings
 from src.llm_provider import RouterAIProvider
 from src.models import StandardsReport, TestCase
+from src.prompts import build_agent_system_prompt
 from src.tools.sql_tool import get_all_test_cases, get_test_cases_by_reqs
-from src.tracing import OTEL_AVAILABLE, otel_trace as _otel_trace
+from src.tracing import OTEL_AVAILABLE
+from src.tracing import otel_trace as _otel_trace
 
 logger = logging.getLogger(__name__)
 
-STANDARDS_SYSTEM_PROMPT = """Ты — QA lead, проверяющий соответствие стандартам.
-
-Верни СТРОГО валидный JSON:
-{
-  "violations": [{"rule_id": str, "severity": "major"|"minor"|"critical", "test_case_id": str, "description": str, "auto_fixable": bool}],
-  "blocking_violations": [str],
-  "auto_fix_available": [str],
-  "human_review_required": [str]
-}
-
-Правила:
-- QA-TEST-001: ID начинается с "TC-"
-- QA-TEST-002: title <= 120 символов, не "Проверить..."
-- QA-TEST-003: req не пуст
-- QA-TEST-004: description >= 20 символов
-- QA-TEST-005: steps без "проверить", "убедиться"
-- QA-TEST-006: expected_result без шаблонных фраз
-- QA-TEST-008: test_type не пуст
-- QA-TEST-009: preconditions не пустые
-- QA-TEST-010: нет секретов (token=, password=, user@example.com, abc123)
-
-Блокирующие: QA-TEST-010
-Auto-fix: QA-TEST-002, QA-TEST-004, QA-TEST-005, QA-TEST-006, QA-TEST-009
-"""
+STANDARDS_SYSTEM_PROMPT = build_agent_system_prompt("standards_agent")
 
 
 def _prepare_test_cases_data(test_cases: list[dict]) -> list[dict]:
@@ -136,7 +115,7 @@ def run_standards_agent(
     if llm is None:
         llm = RouterAIProvider(settings)
 
-    from src.tracing import trace_agent, set_span_output
+    from src.tracing import set_span_output, trace_agent
 
     CHUNK_SIZE = 50
 

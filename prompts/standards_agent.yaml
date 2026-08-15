@@ -138,3 +138,11 @@ output_schema:
   blocking_violations: list
   auto_fix_available: list
   human_review_required: list
+
+response_json: |
+  {
+    "violations": [{"rule_id": "", "severity": "major", "test_case_id": "", "description": "", "auto_fixable": false}],
+    "blocking_violations": [""],
+    "auto_fix_available": [""],
+    "human_review_required": [""]
+  }

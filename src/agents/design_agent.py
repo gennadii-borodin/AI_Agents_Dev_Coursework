@@ -1,14 +1,20 @@
 import json
 import logging
 import re
-from typing import Any, Optional
+from typing import Optional
 
 import json_repair
 
 from src.config import Settings, get_settings
 from src.llm_provider import RouterAIProvider
 from src.models import DesignReport, Requirement, TestCase
-from src.tools.sql_tool import get_all_requirements, get_all_test_cases, get_requirements_by_ids, get_test_cases_by_reqs
+from src.prompts import build_agent_system_prompt
+from src.tools.sql_tool import (
+    get_all_requirements,
+    get_all_test_cases,
+    get_requirements_by_ids,
+    get_test_cases_by_reqs,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -34,21 +40,7 @@ def _fix_json(text: str) -> str:
     text = re.sub(r":\s*,", ": null,", text)
     return text
 
-DESIGN_SYSTEM_PROMPT = """Ты — старший QA-инженер, эксперт по тест-дизайну.
-
-Входные данные уже переданы. Проанализируй их и верни СТРОГО валидный JSON:
-{
-  "overall_score": float (0-100),
-  "techniques_applied": [{"technique": str, "coverage": "partial"}],
-  "missing_techniques": [str],
-  "weak_tests": [{"test_case_id": str, "reason": str}],
-  "duplicate_tests": [{"original": str, "duplicates": [str]}],
-  "recommendations": [str],
-  "test_scores": [{"test_case_id": str, "score": float}]
-}
-
-Вывод должен содержать ТОЛЬКО эти поля. Не включай сырые данные из входных требований или тестов в значения полей.
-"""
+DESIGN_SYSTEM_PROMPT = build_agent_system_prompt("design_agent")
 
 
 def _prepare_requirements_data(requirements: list[dict]) -> list[dict]:
@@ -92,7 +84,7 @@ def run_design_agent(
     if llm is None:
         llm = RouterAIProvider(settings)
 
-    from src.tracing import trace_agent, set_span_output
+    from src.tracing import set_span_output, trace_agent
 
     with trace_agent(
         "Design Agent",

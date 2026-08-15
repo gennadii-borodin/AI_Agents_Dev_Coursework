@@ -125,3 +125,14 @@ output_schema:
   duplicate_tests: list
   recommendations: list
   test_scores: list
+
+response_json: |
+  {
+    "overall_score": 0.0,
+    "techniques_applied": [{"technique": "", "coverage": "partial"}],
+    "missing_techniques": [""],
+    "weak_tests": [{"test_case_id": "", "reason": ""}],
+    "duplicate_tests": [{"original": "", "duplicates": [""]}],
+    "recommendations": [""],
+    "test_scores": [{"test_case_id": "", "score": 0.0}]
+  }

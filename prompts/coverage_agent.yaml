@@ -105,3 +105,16 @@ output_schema:
   gaps: list
   recommendations: list
   residual_risk: string
+
+response_json: |
+  {
+    "total_coverage": 0.0,
+    "critical_coverage": 0.0,
+    "matrix": [{"requirement_id": "REQ-1", "title": "", "category": "", "priority": "", "weight": 0.0, "covered": false, "test_count": 0, "test_types": [""]}],
+    "uncovered_requirements": [""],
+    "tests_without_requirements": [""],
+    "indirect_coverage": [{"requirement_id": "REQ-1", "reason": ""}],
+    "gaps": [""],
+    "recommendations": [""],
+    "residual_risk": "low"
+  }

@@ -1,14 +1,15 @@
 import json
 import logging
 import re
-from typing import Any, Optional
+from typing import Optional
 
 import json_repair
 
 from src.config import Settings, get_settings
 from src.llm_provider import RouterAIProvider
 from src.models import CoverageReport, Requirement, TestCase
-from src.tools.rag_tool import rag_search_by_requirement, rag_search
+from src.prompts import build_agent_system_prompt
+from src.tools.rag_tool import rag_search
 from src.tools.sql_tool import (
     get_all_requirements,
     get_all_test_cases,
@@ -36,28 +37,7 @@ def _fix_json(text: str) -> str:
 
 PRIORITY_WEIGHTS = {"Critical": 3, "High": 2, "Medium": 1, "Low": 0.5}
 
-COVERAGE_SYSTEM_PROMPT = """Ты — старший QA-инженер, эксперт по покрытию требований.
-
-Верни СТРОГО валидный JSON со следующей структурой:
-{
-  "total_coverage": float,
-  "critical_coverage": float,
-  "matrix": [{"requirement_id": str, "title": str, "category": str, "priority": str, "weight": float, "covered": bool, "test_count": int, "test_types": [str]}],
-  "uncovered_requirements": [str],
-  "tests_without_requirements": [str],
-  "indirect_coverage": [{"requirement_id": str, "reason": str}],
-  "gaps": [str],
-  "recommendations": [str],
-  "residual_risk": "low" | "medium" | "high"
-}
-
-Вес требования: Critical=3, High=2, Medium=1, Low=0.5
-total_coverage = (сумма весов покрытых требований / сумма весов всех требований) * 100
-critical_coverage = (покрытые Critical / все Critical) * 100
-indirect_coverage: требования с >6 тестами
-gaps: требования без негативных или без позитивных тестов
-residual_risk: high если total_coverage<80 или critical_coverage<100, medium если total_coverage<95, иначе low
-"""
+COVERAGE_SYSTEM_PROMPT = build_agent_system_prompt("coverage_agent")
 
 
 def _prepare_requirements_data(requirements: list[dict]) -> list[dict]:
@@ -98,7 +78,7 @@ def run_coverage_agent(
     if llm is None:
         llm = RouterAIProvider(settings)
 
-    from src.tracing import trace_agent, set_span_output
+    from src.tracing import set_span_output, trace_agent
 
     with trace_agent(
         "Coverage Agent",
