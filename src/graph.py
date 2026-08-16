@@ -4,7 +4,7 @@ import re
 from typing import Optional
 
 from langgraph.graph import END, StateGraph
-from langgraph.types import Send
+from langgraph.types import Command, Send
 
 from src.agents.coverage_agent import run_coverage_agent
 from src.agents.design_agent import run_design_agent
@@ -223,10 +223,63 @@ def load_data_once(state: ReviewState, settings: Optional[Settings] = None) -> R
 def finalize(state: ReviewState) -> ReviewState:
     """Точка сбора после параллельного fan-out агентов (revью §1/T2).
 
-    Место для будущей QA-валидации/итоговой свёртки; пока — точка
-    конвергенции веток перед END.
+    Конвергенция веток перед quality_gate.
     """
     logger.info("Finalizing review")
+    return state
+
+
+_REPORT_FIELDS = {
+    "coverage": "coverage_report",
+    "design": "design_report",
+    "standards": "standards_report",
+}
+
+
+def _build_final_answer(state: ReviewState) -> str:
+    parts: list[str] = []
+    if state.coverage_report:
+        parts.append(f"Coverage: {state.coverage_report.total_coverage:.0f}% total")
+    if state.design_report:
+        parts.append(f"Design score: {state.design_report.overall_score:.0f}")
+    if state.standards_report:
+        parts.append(f"Standards compliance: {state.standards_report.compliance_percentage:.0f}%")
+    if state.sql_results.get("unlinked_tests"):
+        parts.append(f"Unlinked tests: {len(state.sql_results['unlinked_tests'])}")
+    return "; ".join(parts) if parts else "no reports produced"
+
+
+def quality_gate(state: ReviewState, settings: Optional[Settings] = None) -> ReviewState | Command:
+    """QA-валидация и targeted retry (revью §4, Этап 4).
+
+    После параллельного fan-out проверяем, что ожидаемые агенты выдали отчёты.
+    Если какой-то упал (partial, report=None) и включён targeted_retry — повторно
+    запускаем ТОЛЬКО упавших агентов через Send, без перезапуска всего прогона.
+    Число попыток ограничено ``max_retry_attempts`` (защита от петли).
+    В финале агрегируем ``final_answer`` и фиксируем частичные сбои.
+    """
+    if settings is None:
+        settings = get_settings()
+
+    state.iteration += 1
+    expected = [a for a in ("coverage", "design", "standards") if a in (state.agents_to_run or [])]
+    missing = [a for a in expected if getattr(state, _REPORT_FIELDS[a]) is None]
+
+    if missing and settings.targeted_retry_enabled and state.iteration <= settings.max_retry_attempts:
+        logger.warning(
+            f"quality_gate: повторный запуск агентов {missing} (попытка {state.iteration})"
+        )
+        return Command(
+            goto=[Send(a, state) for a in missing],
+            update={"iteration": state.iteration},
+        )
+
+    # Финальная агрегация.
+    state.final_answer = _build_final_answer(state)
+    if missing:
+        state.unresolved_questions.append(
+            f"partial review: missing reports for {missing}"
+        )
     return state
 
 
@@ -240,19 +293,21 @@ def build_graph(checkpointer=None) -> StateGraph:
     workflow.add_node("standards", run_standards_node)
     workflow.add_node("find_unlinked", run_find_unlinked_node)
     workflow.add_node("finalize", finalize)
+    workflow.add_node("quality_gate", quality_gate)
 
     workflow.set_entry_point("router")
     workflow.add_edge("router", "load_data_once")
 
     # Параллельный fan-out независимых агентов через Send API (T2, §1 ревью).
     # Каждый агент пишет только свой report-ключ — параллельные записи
-    # не пересекаются, гонки исключены. Ветки сходятся в finalize -> END.
+    # не пересекаются, гонки исключены. Ветки сходятся в finalize -> quality_gate.
     workflow.add_conditional_edges("load_data_once", _fan_out)
 
     workflow.add_edge("coverage", "finalize")
     workflow.add_edge("design", "finalize")
     workflow.add_edge("standards", "finalize")
     workflow.add_edge("find_unlinked", "finalize")
-    workflow.add_edge("finalize", END)
+    workflow.add_edge("finalize", "quality_gate")
+    workflow.add_edge("quality_gate", END)
 
     return workflow.compile(checkpointer=checkpointer)

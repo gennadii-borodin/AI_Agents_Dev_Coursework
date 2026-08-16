@@ -44,6 +44,10 @@ class Settings(BaseSettings):
     # Верхняя граница числа чанковых итераций Standards-агента (revью T4,
     # защита от runaway-циклов при сбое пагинации): 0/отрицательное = без лимита.
     standards_max_iterations: int = 200
+    # Targeted retry в quality_gate (revью §4, Этап 4): при partial-сбое
+    # повторно запускаем только упавшие агенты, а не весь прогон.
+    targeted_retry_enabled: bool = True
+    max_retry_attempts: int = 2
 
     # Пороги бизнес-логики агентов.
     agents_chunk_size: int = 50
