@@ -148,3 +148,43 @@ def test_nested_list_violations_do_not_crash(monkeypatch):
     assert isinstance(report.violations, list)
     assert len(report.violations) == 2
     assert all(isinstance(v, dict) for v in report.violations)
+
+
+def test_standards_partial_on_chunk_failure(monkeypatch):
+    """Провал одного чанка (исчерпаны retries LLM) не рушит прогон:
+
+    - помечается partial=True, failed_chunks>0;
+    - провалившийся чанк исключается из знаменателя compliance;
+    - остальные чанки анализируются и попадают в отчёт.
+    """
+    import src.agents.standards_agent as sa
+
+    orig = sa._analyze_chunk
+    calls = {"n": 0}
+
+    def flaky(chunk, llm, settings):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("LLM provider returned empty content")
+        return orig(chunk, llm, settings)
+
+    monkeypatch.setattr(sa, "_analyze_chunk", flaky)
+
+    rules = [{"id": f"R-{i}"} for i in range(3)]
+    monkeypatch.setattr(sa, "load_standards_rules", lambda: {"rules": rules})
+    sa.num_active_rules.cache_clear()
+    sa.rule_classification.cache_clear()
+
+    # 60 ТК при chunk_size=50 → 2 чанка; первый упадёт, второй отработает.
+    stub = ScriptedLLM()
+    apply_llm_patch(monkeypatch, stub)
+
+    report = run_standards_agent(test_cases=_make_tcs(60))
+    assert report.partial is True
+    assert report.failed_chunks == 1
+    # первый чанк (50 ТК) упал и исключён, второй (10 ТК) проанализирован
+    assert report.analyzed_test_cases == 10
+    # compliance считается только по проанализированным 10 ТК
+    total = 10 * 3
+    expected = round((total - 2) / total * 100, 1)
+    assert report.compliance_percentage == expected

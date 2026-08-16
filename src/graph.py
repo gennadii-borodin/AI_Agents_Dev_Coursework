@@ -25,6 +25,16 @@ KNOWN_SCENARIOS = {
     "find_unlinked_tests",
 }
 
+# Сообщение, выдаваемое пользователю, когда роутер не смог определить
+# сценарий (сбой LLM или недопустимый/неизвестный scenario от модели).
+ROUTING_FAILED_MESSAGE = (
+    "Не удалось определить сценарий по запросу. "
+    "Переформулируйте задачу, например: "
+    "'провести полное ревью', 'проверить покрытие REQ-001', "
+    "'оценить дизайн тестов', 'проверить стандарты', "
+    "'найти тесты без требований'."
+)
+
 
 def _regex_route(query: str) -> tuple[str, list[str]]:
     """Детерминированный запасной роутинг (используется при сбое LLM)."""
@@ -73,36 +83,41 @@ def route_request(state: ReviewState, settings: Optional[Settings] = None) -> Re
         settings = get_settings()
 
     with trace_agent("Router", **{"agent.type": "router"}) as span:
-        scenario, requirement_ids = _regex_route(state.user_query)
-        # router-LLM избыточен: его scenario отбрасывается, REQ-IDs и так даёт
-        # regex. Вызов опционален через флаг (revью §2, Этап 3) — по умолчанию
-        # сохраняем поведение, но при router_llm_enabled=False идём без LLM.
-        if settings.router_llm_enabled:
-            llm = RouterAIProvider(settings)
-            try:
-                llm_scenario, llm_req_ids = _llm_route(state.user_query, llm, settings)
-                # Сценарий остаётся детерминированным (regex) — источник истины.
-                # LLM используется только для извлечения requirement_ids; его
-                # scenario игнорируется (защита от prompt-injection/переопределения — M2).
-                # Невалидный scenario от LLM не должен попасть в state (защита C1).
-                if llm_scenario and llm_scenario not in KNOWN_SCENARIOS:
-                    logger.warning(
-                        f"LLM returned unknown scenario '{llm_scenario}', ignored; "
-                        f"keeping regex scenario '{scenario}'"
-                    )
-                # LLM может не вернуть REQ-идентификаторы — добавляем из регулярки.
-                regex_ids = re.findall(r"REQ-\d+", state.user_query.upper())
-                merged = list(dict.fromkeys(list(requirement_ids) + llm_req_ids + regex_ids))
-                requirement_ids = merged
-                if span is not None:
-                    span.set_attribute("router.method", "llm")
-            except Exception as e:
-                logger.warning(f"LLM routing failed, using regex fallback: {e}")
-                if span is not None:
-                    span.set_attribute("router.method", "regex")
-        else:
+
+        def _fail(detail: str) -> ReviewState:
+            logger.warning(f"Routing failed: {detail}")
+            state.scenario = ""
+            state.agents_to_run = []
+            state.requirement_ids = None
+            state.errors.append(f"routing_failed: {detail}")
+            state.unresolved_questions.append(ROUTING_FAILED_MESSAGE)
+            state.final_answer = ROUTING_FAILED_MESSAGE
             if span is not None:
-                span.set_attribute("router.method", "regex-disabled")
+                span.set_attribute("router.method", "llm-failed")
+                span.set_attribute("router.scenario", "unknown")
+                set_span_output(
+                    span,
+                    {"scenario": "unknown", "error": detail},
+                    mime_type="application/json",
+                )
+            logger.info("Routing failed, asking user to rephrase")
+            return state
+
+        if settings.router_llm_enabled:
+            # Маршрутизация целиком ложится на младшую LLM-модель (источник истины).
+            # requirement_ids берутся ТОЛЬКО из ответа LLM.
+            try:
+                scenario, requirement_ids = _llm_route(state.user_query, RouterAIProvider(settings), settings)
+            except Exception as e:
+                return _fail(f"LLM-роутер недоступен: {e}")
+            if scenario not in KNOWN_SCENARIOS:
+                return _fail(f"недопустимый сценарий от LLM: '{scenario}'")
+            method = "llm"
+            ids = requirement_ids
+        else:
+            # Legacy-путь: LLM-роутер отключён, используем детерминированный regex.
+            scenario, ids = _regex_route(state.user_query)
+            method = "regex-disabled"
 
         agents_map = {
             "full_review": ["coverage", "design", "standards"],
@@ -114,10 +129,11 @@ def route_request(state: ReviewState, settings: Optional[Settings] = None) -> Re
         }
 
         state.scenario = scenario
-        state.requirement_ids = requirement_ids if requirement_ids else None
-        state.agents_to_run = agents_map.get(scenario, ["coverage"])
+        state.requirement_ids = ids if ids else None
+        state.agents_to_run = agents_map.get(scenario, [])
 
         if span is not None:
+            span.set_attribute("router.method", method)
             span.set_attribute("router.scenario", scenario)
             span.set_attribute("router.requirement_ids", ",".join(state.requirement_ids or []))
             span.set_attribute("router.agents", ",".join(state.agents_to_run))
@@ -138,6 +154,9 @@ def _fan_out(state: ReviewState) -> list:
     """
     if state.scenario == "find_unlinked_tests":
         return [Send("find_unlinked", state)]
+    # Неизвестный/пустой scenario (в т.ч. провал роутинга) — агентов не запускаем.
+    if state.scenario not in KNOWN_SCENARIOS:
+        return []
     branch_order = ("coverage", "design", "standards")
     return [Send(name, state) for name in branch_order if name in (state.agents_to_run or [])]
 
@@ -203,20 +222,58 @@ def run_find_unlinked_node(state: ReviewState) -> ReviewState:
 
 
 def load_data_once(state: ReviewState, settings: Optional[Settings] = None) -> ReviewState:
-    """Однократная выгрузка требований и ТК в state (T3, §3 ревью).
+    """Селективная однократная выгрузка данных в state (T3, §3 ревью).
 
-    Устраняет тройную полную выгрузку БД агентами: данные грузятся 1× здесь,
-    далее агенты читают из ``state.requirements`` / ``state.test_cases``.
+    Гибрид:
+    - ``find_unlinked_tests``: целевой SQL выполняет ``run_find_unlinked_node``,
+      общая выгрузка не нужна — возвращаем state без обращения к БД;
+    - ``requirement_coverage``: грузим только запрошенные требования и их ТК
+      (базовое ядро под сценарий), остальное агенты дочитывают сами при
+      необходимости (ветка ``if requirements is None`` в агентах);
+    - остальные сценарии: полная выгрузка (текущее поведение).
+    DB-вызовы обёрнуты в спан ``load_data_once`` для наблюдаемости.
     """
     if settings is None:
         settings = get_settings()
     from src.models import Requirement, TestCase
-    from src.tools.sql_tool import get_all_requirements, get_all_test_cases
+    from src.tracing import trace_tool
+    from src.tools.sql_tool import (
+        get_all_requirements,
+        get_all_test_cases,
+        get_requirements_by_ids,
+        get_test_cases_by_reqs,
+    )
 
-    if not state.requirements:
-        state.requirements = [Requirement(**r) for r in get_all_requirements()]
-    if not state.test_cases:
-        state.test_cases = [TestCase(**t) for t in get_all_test_cases()]
+    req_ids = state.requirement_ids or []
+
+    # find_unlinked_tests: общая выгрузка не требуется (свой целевой SQL в узле).
+    if state.scenario == "find_unlinked_tests":
+        with trace_tool(
+            "load_data_once",
+            {"scenario": state.scenario, "skipped": True},
+            tool_type="CHAIN",
+        ):
+            pass
+        return state
+
+    with trace_tool(
+        "load_data_once",
+        {"scenario": state.scenario, "requirement_ids": ",".join(req_ids)},
+        tool_type="CHAIN",
+    ):
+        # requirement_coverage: базовое ядро — только запрошенные REQ + их ТК.
+        if state.scenario == "requirement_coverage" and req_ids:
+            if not state.requirements:
+                state.requirements = [Requirement(**r) for r in get_requirements_by_ids(req_ids)]
+            if not state.test_cases:
+                state.test_cases = [TestCase(**t) for t in get_test_cases_by_reqs(req_ids)]
+            return state
+
+        # Полная выгрузка для остальных сценариев (и requirement_coverage без REQ-id).
+        if not state.requirements:
+            state.requirements = [Requirement(**r) for r in get_all_requirements()]
+        if not state.test_cases:
+            state.test_cases = [TestCase(**t) for t in get_all_test_cases()]
     return state
 
 
@@ -237,6 +294,10 @@ _REPORT_FIELDS = {
 
 
 def _build_final_answer(state: ReviewState) -> str:
+    # При провале роутинга агенты не запускались — возвращаем просьбу
+    # переформулировать задачу, а не неинформативное «no reports produced».
+    if not state.agents_to_run and state.unresolved_questions:
+        return state.unresolved_questions[-1]
     parts: list[str] = []
     if state.coverage_report:
         parts.append(f"Coverage: {state.coverage_report.total_coverage:.0f}% total")

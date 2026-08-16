@@ -213,6 +213,8 @@ def run_standards_agent(
         chunk_total = (len(tc_dicts) + chunk_size - 1) // chunk_size
         max_iter = settings.standards_max_iterations
         iteration = 0
+        analyzed_count = 0
+        failed_chunks = 0
 
         for i in range(0, len(tc_dicts), chunk_size):
             # Защита от runaway-цикла (revью T4): жёсткий потолок итераций.
@@ -223,31 +225,36 @@ def run_standards_agent(
                 break
             chunk = tc_dicts[i:i + chunk_size]
             logger.info(f"Analyzing standards chunk {iteration + 1}/{chunk_total}")
-            chunk_violations = _analyze_chunk(chunk, llm, settings)
-            all_violations.extend(chunk_violations)
+            try:
+                chunk_violations = _analyze_chunk(chunk, llm, settings)
+                all_violations.extend(chunk_violations)
+                analyzed_count += len(chunk)
+            except Exception as e:
+                # Провал чанка (исчерпаны retries LLM) — не падаем всем прогоном,
+                # а исключаем чанк из знаменателя compliance и помечаем partial.
+                logger.warning(f"Standards chunk {iteration + 1}/{chunk_total} failed: {e}")
+                failed_chunks += 1
             iteration += 1
 
         num_rules = num_active_rules()
-        if span is not None:
-            span.set_attribute("chunks.total", chunk_total)
-            span.set_attribute("violations.total", len(all_violations))
-            if num_rules > 0 and test_cases:
-                denom = len(test_cases) * num_rules
-                compliance_pct = round((denom - len(all_violations)) / denom * 100, 1)
-            else:
-                compliance_pct = 100.0
-            set_span_output(span, {"compliance_percentage": compliance_pct}, mime_type="application/json")
-
-    num_rules = num_active_rules()
-    if num_rules > 0 and test_cases:
-        total_checks = len(test_cases) * num_rules
-        passed_checks = total_checks - len(all_violations)
-        compliance = (passed_checks / total_checks * 100) if total_checks > 0 else 100.0
-    else:
         if num_rules == 0:
             logger.warning("standards_rules.yaml is empty; compliance set to 100.0")
-        compliance = 100.0
-    compliance = max(0.0, min(100.0, compliance))
+            compliance = 100.0
+        elif analyzed_count == 0:
+            # Все чанки упали — анализ не выполнен, compliance неизвестен.
+            compliance = 0.0
+        else:
+            total_checks = analyzed_count * num_rules
+            passed_checks = total_checks - len(all_violations)
+            compliance = (passed_checks / total_checks * 100) if total_checks > 0 else 100.0
+        compliance = max(0.0, min(100.0, compliance))
+
+        if span is not None:
+            span.set_attribute("chunks.total", chunk_total)
+            span.set_attribute("chunks.failed", failed_chunks)
+            span.set_attribute("analyzed_test_cases", analyzed_count)
+            span.set_attribute("violations.total", len(all_violations))
+            set_span_output(span, {"compliance_percentage": compliance}, mime_type="application/json")
 
     blocking_rule_ids, auto_fix_rule_ids = rule_classification()
     blocking = [
@@ -274,4 +281,7 @@ def run_standards_agent(
         blocking_violations=blocking,
         auto_fix_available=auto_fix,
         human_review_required=human_review,
+        partial=(failed_chunks > 0),
+        failed_chunks=failed_chunks,
+        analyzed_test_cases=analyzed_count,
     )

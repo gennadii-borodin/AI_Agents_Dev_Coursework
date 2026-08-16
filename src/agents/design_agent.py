@@ -209,7 +209,12 @@ def _normalize_design(data: dict) -> dict:
     """Дозаполняет обязательные ключи, чтобы отчёт рендерился даже при
     обрезанном/неполном JSON-ответе модели (без KeyError в report.py)."""
     if not isinstance(data, dict):
-        return {"overall_score": 0.0}
+        # LLM вернул не объект (напр. JSON-массив) — бросаем, чтобы узел
+        # поймал ошибку и quality_gate повторил агента, вместо тихой
+        # генерации пустого отчёта с score=0.
+        raise ValueError(
+            f"Design LLM returned {type(data).__name__}, expected object"
+        )
     data.setdefault("overall_score", 0.0)
     data["techniques_applied"] = [
         {

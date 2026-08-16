@@ -21,6 +21,27 @@ from src.tracing import (
 logger = logging.getLogger(__name__)
 
 
+def _coerce_tool_results(tool_results: list[str]) -> str:
+    """Собирает результаты нескольких вызовов инструментов в единый валидный JSON.
+
+    ``invoke_with_tools`` может сделать несколько раундов tool_calls; результаты
+    каждого склеиваются. Простая склейка через ``\\n`` даёт невалидный JSON
+    («Extra data»), поэтому здесь каждый результат парсится и объединяется
+    в плоский список (для rag_search) либо список объектов.
+    """
+    combined: list = []
+    for tr in tool_results:
+        try:
+            obj = json.loads(tr)
+        except Exception:
+            continue
+        if isinstance(obj, list):
+            combined.extend(obj)
+        elif isinstance(obj, dict):
+            combined.append(obj)
+    return json.dumps(combined, ensure_ascii=False)
+
+
 def _on_retry(retry_state):
     """Добавляет событие повтора на текущий спан LLM (видно в трейсе)."""
     if not OTEL_AVAILABLE or _otel_trace is None:
@@ -205,8 +226,10 @@ class RouterAIProvider:
 
                     tool_calls = msg.get("tool_calls") or []
                     if not tool_calls:
-                        if return_tool_results and tool_results:
-                            return "\n".join(tool_results)
+                        if return_tool_results:
+                            # Нет вызовов инструментов — возвращаем пустой список,
+                            # чтобы вызывающий код получил валидный JSON.
+                            return _coerce_tool_results(tool_results) if tool_results else "[]"
                         return content
                     last_content = content
                     messages.append(msg)
@@ -230,5 +253,5 @@ class RouterAIProvider:
                 raise
 
         if return_tool_results and tool_results:
-            return "\n".join(tool_results)
+            return _coerce_tool_results(tool_results)
         return last_content

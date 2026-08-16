@@ -46,6 +46,13 @@ def _recompute_coverage(data: dict, settings: Optional[Settings] = None) -> dict
         settings = get_settings()
     weights = settings.priority_weights
 
+    if not isinstance(data, dict):
+        # LLM вернул не объект (напр. JSON-массив) — бросаем, чтобы узел
+        # поймал ошибку и quality_gate повторил агента, вместо краша графа.
+        raise ValueError(
+            f"Coverage LLM returned {type(data).__name__}, expected object"
+        )
+
     matrix = data.get("matrix") or []
     if not matrix:
         return data
@@ -201,6 +208,12 @@ def run_coverage_agent(
                                 "top_k": settings.rag_top_k,
                             },
                         )
+                        # registry.execute возвращает list, но на всякий случай
+                        # защищаемся от dict-обёртки ({"results": [...]}).
+                        if isinstance(similar_tests, dict):
+                            similar_tests = similar_tests.get("results", [])
+                        if not isinstance(similar_tests, list):
+                            similar_tests = []
                     similar_tests_json = json.dumps(
                         [
                             {

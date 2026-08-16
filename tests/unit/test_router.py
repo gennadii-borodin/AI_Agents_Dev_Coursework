@@ -1,6 +1,7 @@
 
 from src.graph import _regex_route, route_request
 from src.models import ReviewState
+from tests.integration.helpers import ScriptedLLM, apply_llm_patch
 
 
 def test_regex_route_full_review_by_default():
@@ -26,7 +27,30 @@ def test_regex_route_unlinked():
     assert _regex_route("найди тесты без требований unlinked")[0] == "find_unlinked_tests"
 
 
-def test_route_request_falls_back_to_regex_on_llm_error(monkeypatch):
+def test_route_request_uses_llm_scenario_authoritatively(monkeypatch):
+    # regex отправил бы "сделай всё" в full_review, но LLM-роутер — единственный
+    # источник истины — возвращает find_unlinked_tests. Проверяет, что scenario
+    # берётся из LLM, а не из regex (фикс семантического разрыва роутинга).
+    stub = ScriptedLLM(router_response='{"scenario": "find_unlinked_tests", "requirement_ids": []}')
+    apply_llm_patch(monkeypatch, stub)
+
+    state = route_request(ReviewState(user_query="сделай всё и сразу"))
+    assert state.scenario == "find_unlinked_tests"
+    assert state.agents_to_run == []
+
+
+def test_route_request_requirement_ids_only_from_llm(monkeypatch):
+    # requirement_ids берутся только из LLM-ответа, а не из regex-извлечения
+    # из текста запроса.
+    stub = ScriptedLLM(router_response='{"scenario": "requirement_coverage", "requirement_ids": ["REQ-007"]}')
+    apply_llm_patch(monkeypatch, stub)
+
+    state = route_request(ReviewState(user_query="проверь покрытие"))
+    assert state.scenario == "requirement_coverage"
+    assert state.requirement_ids == ["REQ-007"]
+
+
+def test_route_request_asks_rephrase_on_llm_error(monkeypatch):
     def boom(*args, **kwargs):
         raise RuntimeError("llm down")
 
@@ -35,11 +59,15 @@ def test_route_request_falls_back_to_regex_on_llm_error(monkeypatch):
     )
 
     state = route_request(ReviewState(user_query="проверь покрытие требований"))
-    assert state.scenario == "coverage_review"
-    assert state.agents_to_run == ["coverage"]
+    # LLM недоступен → маршрутизация не может определить сценарий,
+    # просим пользователя переформулировать (агенты не запускаются).
+    assert state.scenario == ""
+    assert state.agents_to_run == []
+    assert any("routing_failed" in e for e in state.errors)
+    assert state.unresolved_questions
 
 
-def test_unknown_llm_scenario_is_clamped(monkeypatch):
+def test_unknown_llm_scenario_asks_rephrase(monkeypatch):
     def bad_scenario(self, *args, **kwargs):
         # LLM возвращает сценарий вне допустимого набора (adversarial #1, C1)
         return '{"scenario": "coverage", "requirement_ids": []}'
@@ -49,9 +77,11 @@ def test_unknown_llm_scenario_is_clamped(monkeypatch):
     )
 
     state = route_request(ReviewState(user_query="проверь покрытие требований"))
-    # scenario не перезаписывается недопустимым значением; остаётся из regex
-    assert state.scenario == "coverage_review"
-    assert state.agents_to_run == ["coverage"]
+    # Недопустимый scenario от LLM → просим переформулировать, а не молча
+    # подменяем regex-значением.
+    assert state.scenario == ""
+    assert state.agents_to_run == []
+    assert any("routing_failed" in e for e in state.errors)
 
 
 def test_graph_invoke_does_not_crash_on_unknown_scenario(monkeypatch, isolate_services):
@@ -62,7 +92,10 @@ def test_graph_invoke_does_not_crash_on_unknown_scenario(monkeypatch, isolate_se
     stub = ScriptedLLM(router_response='{"scenario": "coverage", "requirement_ids": []}')
     apply_llm_patch(monkeypatch, stub)
 
-    # без фикса C1 graph.invoke упал бы с ValueError на conditional_edges
+    # graph.invoke не падает: провал роутинга завершает прогон корректно
+    # и просит пользователя переформулировать задачу.
     g = build_graph()
     result = g.invoke(ReviewState(user_query="проверь покрытие требований"))
-    assert result["scenario"] in {"coverage_review", "full_review"}
+    assert result["scenario"] == ""
+    assert any("routing_failed" in e for e in result["errors"])
+    assert result["final_answer"]

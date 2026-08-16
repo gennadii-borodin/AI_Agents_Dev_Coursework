@@ -56,12 +56,16 @@ def test_design_recovers_from_malformed_json(monkeypatch, isolate_services):
 
 
 # --- Недоступность LLM-роутера -> regex fallback ---------------------------
-def test_router_falls_back_to_regex_on_llm_outage(monkeypatch, isolate_services):
+def test_router_asks_rephrase_on_llm_outage(monkeypatch, isolate_services):
+    # LLM-роутер недоступен (fail_router) → сценарий не определяется,
+    # просим пользователя переформулировать, а не молча подменяем regex.
     stub = ScriptedLLM(fail_router=True)
     apply_llm_patch(monkeypatch, stub)
-    state = route_request(ReviewState(user_query="проверить покрытие требований"))
-    assert state.scenario == "coverage_review"
-    assert state.agents_to_run == ["coverage"]
+    state = route_request(ReviewState(user_query="проверь покрытие требований"))
+    assert state.scenario == ""
+    assert state.agents_to_run == []
+    assert any("routing_failed" in e for e in state.errors)
+    assert state.unresolved_questions
 
 
 # --- Ошибки SQL -> агент не падает -----------------------------------------

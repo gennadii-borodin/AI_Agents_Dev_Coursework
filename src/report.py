@@ -17,6 +17,14 @@ from src.tracing import (
 
 logger = logging.getLogger(__name__)
 
+
+def _state_get(obj: Any, key: str, default: Any = None) -> Any:
+    """Безопасное чтение поля state: graph.invoke возвращает dict, а не модель."""
+    if isinstance(obj, dict):
+        return obj.get(key, default)
+    return getattr(obj, key, default)
+
+
 REPORTS_DIR = Path(__file__).parent.parent / "reports"
 REPORTS_DIR.mkdir(exist_ok=True)
 
@@ -305,7 +313,16 @@ def run_review(
     _error_type: Optional[str] = None
     with trace_run(user_query, "pending", []) as run_span:
         try:
-            state = graph.invoke(state, config=config)
+            state = graph.invoke(state, config)
+            # Статус прогона: routing не определил сценарий → нужна
+            # переформулировка; частичный анализ стандартов → partial.
+            state_errors = _state_get(state, "errors") or []
+            if any("routing_failed" in e for e in state_errors):
+                _run_status = "needs_clarification"
+            else:
+                std = _state_get(state, "standards_report")
+                if std and _state_get(std, "partial"):
+                    _run_status = "partial"
         except Exception as _exc:
             _run_status = "error"
             _error_type = type(_exc).__name__
@@ -382,5 +399,8 @@ def run_review(
     for name, path in saved.items():
         print(f"  - {name}: {path}")
     print(f"  - session: {get_current_session_id()}")
+
+    if _state_get(state, "final_answer"):
+        print("\n" + _state_get(state, "final_answer"))
 
     return state

@@ -59,12 +59,12 @@ def run_migration(
 
     try:
         with psycopg.connect(settings.database_url) as conn:
-            register_vector(conn)
-
             migration_path = Path(__file__).parent.parent / "migrations" / "001_initial.sql"
             migration_sql = migration_path.read_text(encoding="utf-8")
             conn.execute(migration_sql)
             console.print("[green]OK: Таблицы созданы[/green]")
+
+            register_vector(conn)
 
             embedding_provider = EmbeddingProvider(settings) if not skip_embeddings else None
 
