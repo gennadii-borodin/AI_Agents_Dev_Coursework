@@ -9,7 +9,7 @@ from tests.integration.helpers import ScriptedLLM, apply_llm_patch
 def _graph(monkeypatch, retry_enabled: bool = True):
     apply_llm_patch(monkeypatch, ScriptedLLM())
     cfg = Settings(
-        router_ai_api_key="k", database_url="d",
+        router_ai_api_key="k",
         targeted_retry_enabled=retry_enabled, max_retry_attempts=2,
     )
     monkeypatch.setattr("src.graph.get_settings", lambda: cfg)

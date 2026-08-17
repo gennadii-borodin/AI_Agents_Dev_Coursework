@@ -1,12 +1,28 @@
 from functools import lru_cache
 from typing import Optional
 
+from pydantic import computed_field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
     router_ai_api_key: str
-    database_url: str
+
+    # Параметры подключения к БД. Креды вынесены в отдельные переменные
+    # .env/окружения; полный DATABASE_URL собирается из них (см. database_url).
+    db_host: str = "localhost"
+    db_port: int = 5432
+    db_user: str = "qa_user"
+    db_password: str = "qa_password"
+    db_name: str = "qa_review"
+
+    @computed_field
+    @property
+    def database_url(self) -> str:
+        return (
+            f"postgresql://{self.db_user}:{self.db_password}"
+            f"@{self.db_host}:{self.db_port}/{self.db_name}"
+        )
 
     # Базовый URL LLM- и embedding-провайдера (RouterAI). Переопределяется
     # через ROUTERAI_BASE_URL, если нужен прокси/staging/другой шлюз.

@@ -18,7 +18,7 @@ from tests.integration.helpers import (
 
 
 def _settings(**overrides) -> Settings:
-    base = {"router_ai_api_key": "test", "database_url": "postgresql://x"}
+    base = {"router_ai_api_key": "test"}
     base.update(overrides)
     return Settings(**base)
 
