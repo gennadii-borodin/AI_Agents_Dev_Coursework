@@ -1,0 +1,58 @@
+name: code_validator
+version: "2.0"
+description: |
+  Детерминированный статический валидатор тест-кейсов. Проверяет структуру
+  и заполненность полей (пустые/placeholder прекондиции, тестовые данные,
+  ожидаемый результат, шаги; несбалансированные скобки; дубликаты) без
+  обращения к LLM. Используется design-агентом как источник достоверных
+  фактов вместо LLM-гипотез о валидности тестов.
+objective: |
+  Вернуть список структурных находок по каждому ТК и число проверенных ТК.
+when_to_use: |
+  - Как достоверный факт о валидности тестов (вместо LLM-гипотезы).
+  - Перед формированием отчёта design-агентом.
+input:
+  required: [test_cases]
+  properties:
+    test_cases:
+      type: array
+      items:
+        type: object
+      description: >
+        Список ТК (dict с полями test_case_id/req/preconditions/test_data/
+        expected_result/steps/description и т.п.).
+    known_requirement_ids:
+      type: array
+      items:
+        type: string
+      nullable: true
+      description: Известные REQ, чтобы помечать ссылки на неизвестные требования.
+output:
+  required: []
+  properties:
+    findings:
+      type: array
+      items:
+        type: object
+    checked:
+      type: integer
+    error:
+      type: string
+      nullable: true
+returns: |
+  {"findings": [{test_case_id, issues: [коды_проблем]}], "checked": int, "error": null}.
+  Возможные коды issues: empty_preconditions, empty_test_data, empty_expected_result,
+  empty_steps, unbalanced_brackets_in_steps, missing_requirement_link, unknown_requirement_link,
+  placeholder_in_<field>, duplicate_test_case.
+sop: |
+  1. Передай список ТК как test_cases (список dict с полями test_case_id/req/preconditions/...).
+  2. Передай known_requirement_ids, чтобы помечать ссылки на неизвестные REQ.
+  3. Используй findings как достоверные факты; не гадай о валидности самих ТК.
+guardrails:
+  forbidden_actions: []
+  requires_human_approval: false
+  notes: "Детерминированный сервис без LLM и БД; не падает, возвращает findings."
+
+# Детерминированный инструмент без внешних зависимостей: достаточно
+# ограничения по времени выполнения.
+timeout_seconds: 10

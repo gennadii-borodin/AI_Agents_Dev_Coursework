@@ -1,39 +1,61 @@
 name: rag_search
-version: "1.0"
+version: "2.0"
 description: |
-  Skill для поиска релевантной информации через векторный поиск в pgvector.
-  Используется агентами для нахождения связанных требований и тест-кейсов.
+  Векторный семантический поиск похожих требований или тест-кейсов в pgvector.
+  Используется для нахождения косвенно покрывающих ТК и семантически близких артефактов.
+objective: |
+  Вернуть до top_k наиболее семантически близких документов коллекции с оценкой similarity.
+when_to_use: |
+  - Найти тест-кейсы, косвенно покрывающие требование (нет явной привязки REQ).
+  - Найти дубликаты/похожие ТК по смыслу.
+  - НЕ использовать для точного извлечения по ID — для этого есть sql_query.
+input:
+  required: [collection, query]
+  properties:
+    collection:
+      type: string
+      description: Коллекция для поиска.
+      enum: [requirements, test_cases]
+    query:
+      type: string
+      description: Осмысленный текст запроса (заголовок+текст требования), не сырые ID.
+    top_k:
+      type: integer
+      nullable: true
+      minimum: 1
+      maximum: 50
+      default: 10
+      description: Число возвращаемых ближайших документов.
+output:
+  required: []
+  properties:
+    results:
+      type: array
+      items:
+        type: object
+    error:
+      type: string
+      nullable: true
+returns: |
+  Объект {"results": [...], "error": null|string}.
+  Каждый элемент results: {id, title, content, category, priority, similarity (float 0..1, больше = ближе)}.
+  При сбое эмбеддинга/БД/неизвестной коллекции возвращает {"results": [], "error": "<причина>"}
+  (без исключения) — вызывающий продолжает без RAG-контекста, но видит причину в error.
+sop: |
+  1. Убедись, что collection ∈ {requirements, test_cases}, иначе результат будет пустым.
+  2. Передай осмысленный текст запроса (заголовок+текст требования), не сырые ID.
+  3. Вызови инструмент; при пустом результате не гипотезируй покрытие — отметь отсутствие сигнала.
+guardrails:
+  forbidden_actions:
+    - "Не передавай collection, отличный от requirements/test_cases"
+    - "Не используй для мутации данных (только чтение)"
+  requires_human_approval: false
+  notes: "Фоллбэк с сигналом: при любом сбое возвращает {\"results\": [], \"error\": \"<причина>\"}. Исключение НЕ поднимается."
 
-system_prompt: |
-  Ты — RAG-поисковик. Твоя задача — находить релевантные документы
-  по векторному запросу в базе данных PostgreSQL с расширением pgvector.
-
-  ## Коллекции
-  - requirements: требования (requirement_id, title, requirement_text, category, priority)
-  - test_cases: тест-кейсы (test_case_id, req, title, description, test_type, priority)
-
-  ## Использование
-  1. Получи текстовый запрос от агента.
-  2. Сгенерируй эмбеддинг запроса через text-embedding-3-small.
-  3. Выполни векторный поиск в указанной коллекции.
-  4. Верни топ-K наиболее релевантных документов с метаданными.
-
-  ## Параметры
-  - collection: requirements | test_cases
-  - query: текстовый запрос
-  - top_k: количество результатов (по умолчанию 10)
-
-  ## Возвращаемые данные
-  Список документов с полями:
-  - id: идентификатор документа
-  - content: текстовое содержимое
-  - metadata: дополнительные поля
-  - similarity: оценка релевантности (0-1)
-
-input_schema:
-  collection: string
-  query: string
-  top_k: optional[int]
-
-output_schema:
-  results: list
+# Устойчивость вызовов (защита pgvector/эмбеддинг-сервиса).
+timeout_seconds: 10
+rate_limit:
+  max_calls_per_minute: 30
+circuit_breaker:
+  failure_threshold: 5
+  cooldown_seconds: 30

@@ -1,11 +1,9 @@
 import json
 import logging
-import re
 from typing import Optional
 
-import json_repair
-
 from src.config import Settings, get_settings
+from src.json_utils import parse_json_response
 from src.llm_provider import RouterAIProvider
 from src.models import CoverageReport, Requirement, TestCase
 from src.prompts import build_agent_system_prompt, build_json_schema
@@ -20,38 +18,45 @@ from src.tools.sql_tool import (
 logger = logging.getLogger(__name__)
 
 
-def _fix_json(text: str) -> str:
-    text = text.strip()
-    if not text.startswith("{"):
-        idx = text.find("{")
-        if idx >= 0:
-            text = text[idx:]
-    if text.endswith(","):
-        text = text[:-1]
-    if not text.endswith("}"):
-        text = text + "}"
-    text = re.sub(r",\s*}", "}", text)
-    text = re.sub(r",\s*]", "]", text)
-    return text
-PRIORITY_WEIGHTS = {"Critical": 3, "High": 2, "Medium": 1, "Low": 0.5}
-
-
-def _recompute_coverage(data: dict) -> dict:
+def _recompute_coverage(data: dict, settings: Optional[Settings] = None) -> dict:
     """Пересчитывает агрегаты покрытия в коде по матрице требований.
 
     LLM возвращает матрицу с флагом covered/weight/priority по каждому
     требованию; итоговые проценты и остаточный риск вычисляются детерминированно,
-    без полагания на арифметику модели.
+    без полагания на арифметику модели.     Вес берётся из поля ``weight`` матрицы (если это положительное число),
+    а при его отсутствии/нулевом значении — из ``settings.priority_weights`` по
+    приоритету (сравнение регистронезависимое). Если приоритет не распознан,
+    требование получает вес 1.0, чтобы невалидный/пустой приоритет от LLM не
+    обнулял знаменатель и не превращал реальное покрытие в 0%.
+    Пороги остаточного риска — из настроек.
     """
+    if settings is None:
+        settings = get_settings()
+    weights = settings.priority_weights
+
+    if not isinstance(data, dict):
+        # LLM вернул не объект (напр. JSON-массив) — бросаем, чтобы узел
+        # поймал ошибку и quality_gate повторил агента, вместо краша графа.
+        raise ValueError(
+            f"Coverage LLM returned {type(data).__name__}, expected object"
+        )
+
     matrix = data.get("matrix") or []
     if not matrix:
         return data
 
     def _w(m: dict) -> float:
         try:
-            return float(m.get("weight") or 0.0)
+            w = float(m.get("weight") or 0.0)
         except (TypeError, ValueError):
-            return 0.0
+            w = 0.0
+        if w > 0:
+            return w
+        prio = str(m.get("priority") or "").strip().lower()
+        for k, v in weights.items():
+            if k.lower() == prio:
+                return float(v)
+        return 1.0
 
     total_w = sum(_w(m) for m in matrix)
     covered_w = sum(_w(m) for m in matrix if m.get("covered"))
@@ -62,9 +67,9 @@ def _recompute_coverage(data: dict) -> dict:
     crit_covered = sum(_w(m) for m in critical if m.get("covered"))
     critical_coverage = round(crit_covered / crit_total * 100, 1) if crit_total else 0.0
 
-    if total_coverage < 80 or critical_coverage < 100:
+    if total_coverage < settings.coverage_risk_high_threshold or critical_coverage < 100:
         residual_risk = "high"
-    elif total_coverage < 95:
+    elif total_coverage < settings.coverage_risk_medium_threshold:
         residual_risk = "medium"
     else:
         residual_risk = "low"
@@ -76,6 +81,27 @@ def _recompute_coverage(data: dict) -> dict:
 
 
 COVERAGE_SYSTEM_PROMPT = build_agent_system_prompt("coverage_agent")
+
+
+def _flatten_rag_results(raw: object) -> list[dict]:
+    """Приводит результат rag_search к плоскому списку найденных артефактов.
+
+    ``invoke_with_tools(return_tool_results=True)`` возвращает список
+    envelope-объектов ``[{"results": [...]}]``, а прямой вызов реестра —
+    один envelope-объект ``{"results": [...]}``. Оба случая сводим к списку
+    самих найденных записей, чтобы итерировать их напрямую.
+    """
+    if isinstance(raw, dict) and "results" in raw:
+        return raw["results"]
+    if isinstance(raw, list):
+        out: list[dict] = []
+        for item in raw:
+            if isinstance(item, dict) and "results" in item:
+                out.extend(item["results"])
+            elif isinstance(item, dict):
+                out.append(item)
+        return out
+    return []
 
 
 def _prepare_requirements_data(requirements: list[dict]) -> list[dict]:
@@ -156,57 +182,71 @@ def run_coverage_agent(
         tc_json = json.dumps(tc_data, ensure_ascii=False)
 
         similar_tests_json = "[]"
-        try:
-            if req_data:
-                from src.skills import ToolRegistry
+        if settings.rag_enabled:
+            try:
+                if req_data:
+                    from src.skills import ToolRegistry
 
-                combined_req_text = " ".join(
-                    f"{r['title']} {r['requirement_text']}" for r in req_data
-                )
-                registry = ToolRegistry()
-                rag_tool = next(
-                    t for t in registry.tools if t["function"]["name"] == "rag_search"
-                )
-                similar_tests: list[dict] = []
-                try:
-                    similar_raw = llm.invoke_with_tools(
-                        system_prompt=(
+                    combined_req_text = " ".join(
+                        f"{r['title']} {r['requirement_text']}" for r in req_data
+                    )
+                    registry = ToolRegistry()
+                    rag_tool = next(
+                        t
+                        for t in registry.tools_for_agent("coverage_agent")
+                        if t["function"]["name"] == "rag_search"
+                    )
+                    similar_tests: list[dict] = []
+                    try:
+                        skill_reference = registry.reference_for_agent("coverage_agent")
+                        rag_system_prompt = (
                             "Используй инструмент rag_search, чтобы найти семантически "
                             "похожие тест-кейсы по тексту требований."
-                        ),
-                        user_message=(
-                            "Найди похожие тест-кейсы (коллекция test_cases) по тексту "
-                            f"требований:\n{combined_req_text}"
-                        ),
-                        tools=[rag_tool],
-                        model=settings.model_junior,
-                        return_tool_results=True,
-                        tool_choice={"type": "function", "function": {"name": "rag_search"}},
+                        )
+                        if skill_reference:
+                            rag_system_prompt = skill_reference + "\n\n" + rag_system_prompt
+                        similar_raw = llm.invoke_with_tools(
+                        system_prompt=rag_system_prompt,
+                            user_message=(
+                                "Найди похожие тест-кейсы (коллекция test_cases) по тексту "
+                                f"требований:\n{combined_req_text}"
+                            ),
+                            tools=[rag_tool],
+                            model=settings.model_junior,
+                            return_tool_results=True,
+                            tool_choice={"type": "function", "function": {"name": "rag_search"}},
+                        )
+                        similar_tests = _flatten_rag_results(json.loads(similar_raw))
+                    except Exception as e:
+                        logger.warning(f"invoke_with_tools rag_search failed, using registry: {e}")
+                        similar_tests = registry.execute_for_agent(
+                            "coverage_agent",
+                            "rag_search",
+                            {
+                                "collection": "test_cases",
+                                "query": combined_req_text,
+                                "top_k": settings.rag_top_k,
+                            },
+                        )
+                        # rag_search возвращает конверт {"results": [...], "error": ...};
+                        # единообразно извлекаем список.
+                        similar_tests = _flatten_rag_results(similar_tests)
+                    similar_tests_json = json.dumps(
+                        [
+                            {
+                                "test_case_id": st.get("id")
+                                or st.get("test_case_id")
+                                or st.get("requirement_id"),
+                                "title": st.get("title", ""),
+                                "similarity": round(st.get("similarity", 0), 3),
+                            }
+                            for st in similar_tests
+                            if isinstance(st, dict)
+                        ],
+                        ensure_ascii=False,
                     )
-                    similar_tests = json.loads(similar_raw)
-                except Exception as e:
-                    logger.warning(f"invoke_with_tools rag_search failed, using registry: {e}")
-                    similar_tests = registry.execute(
-                        "rag_search",
-                        {
-                            "collection": "test_cases",
-                            "query": combined_req_text,
-                            "top_k": settings.rag_top_k,
-                        },
-                    )
-                similar_tests_json = json.dumps(
-                    [
-                        {
-                            "test_case_id": st["id"],
-                            "title": st["title"],
-                            "similarity": round(st["similarity"], 3),
-                        }
-                        for st in similar_tests
-                    ],
-                    ensure_ascii=False,
-                )
-        except Exception as e:
-            logger.warning(f"RAG similarity search skipped: {e}")
+            except Exception as e:
+                logger.warning(f"RAG similarity search skipped: {e}")
 
         user_message = f"""Проанализируй требования и тест-кейсы.
 
@@ -233,8 +273,6 @@ def run_coverage_agent(
                 {"role": "user", "content": user_message},
             ],
             model=settings.model_senior,
-            temperature=0.1,
-            max_tokens=16384,
             response_format={
                 "type": "json_schema",
                 "json_schema": {
@@ -247,36 +285,21 @@ def run_coverage_agent(
         if span is not None:
             span.set_attribute("llm.response.length", len(response) if response else 0)
 
-        try:
-            data = json.loads(response)
-            # Агрегаты считаются в коде по матрице (LLM только классифицирует
-            # покрытие по каждому требованию), чтобы исключить ошибки вычислений.
-            data = _recompute_coverage(data)
-            set_span_output(
-                span,
-                {"total_coverage": data.get("total_coverage")},
-                mime_type="application/json",
-            )
-            return CoverageReport(**data)
-        except json.JSONDecodeError:
+        def _on_repair() -> None:
             if span is not None:
                 span.add_event("json_repaired", {"agent": "coverage", "tool": "json_repair"})
-            try:
-                repaired = json_repair.repair_json(response, return_objects=True)
-                if isinstance(repaired, str):
-                    data = json.loads(repaired)
-                elif isinstance(repaired, dict):
-                    data = repaired
-                else:
-                    raise ValueError(f"Unexpected type: {type(repaired)}")
-                data = _recompute_coverage(data)
-                set_span_output(
-                    span,
-                    {"total_coverage": data.get("total_coverage")},
-                    mime_type="application/json",
-                )
-                return CoverageReport(**data)
-            except Exception as e2:
-                logger.error(f"Failed to repair JSON: {e2}")
-                logger.error(f"Raw response: {response[:500]}")
-                raise
+
+        try:
+            data = json.loads(response)
+        except json.JSONDecodeError:
+            data = parse_json_response(response, on_repair=_on_repair)
+
+        # Агрегаты считаются в коде по матрице (LLM только классифицирует
+        # покрытие по каждому требованию), чтобы исключить ошибки вычислений.
+        data = _recompute_coverage(data, settings)
+        set_span_output(
+            span,
+            {"total_coverage": data.get("total_coverage")},
+            mime_type="application/json",
+        )
+        return CoverageReport(**data)

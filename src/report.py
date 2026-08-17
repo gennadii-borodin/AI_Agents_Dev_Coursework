@@ -1,7 +1,8 @@
 import logging
+import uuid
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
 from src.config import get_settings
 from src.graph import build_graph
@@ -15,6 +16,14 @@ from src.tracing import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _state_get(obj: Any, key: str, default: Any = None) -> Any:
+    """Безопасное чтение поля state: graph.invoke возвращает dict, а не модель."""
+    if isinstance(obj, dict):
+        return obj.get(key, default)
+    return getattr(obj, key, default)
+
 
 REPORTS_DIR = Path(__file__).parent.parent / "reports"
 REPORTS_DIR.mkdir(exist_ok=True)
@@ -185,6 +194,37 @@ def generate_summary_markdown(state: ReviewState) -> str:
         lines.append(f"- **Блокирующих:** {len(sr.blocking_violations)}")
         lines.append("")
 
+    unlinked = (state.sql_results or {}).get("unlinked_tests")
+    if unlinked:
+        lines.append("## Тесты без привязки к требованиям\n")
+        lines.append(f"- **Всего:** {len(unlinked)}")
+        for tc in unlinked:
+            tc_id = tc.get("test_case_id", "?") if isinstance(tc, dict) else str(tc)
+            lines.append(f"  - `{tc_id}`")
+        lines.append("")
+
+    return "\n".join(lines)
+
+
+def generate_unlinked_tests_markdown(unlinked: list) -> str:
+    lines = ["# Тесты без привязки к требованиям\n"]
+    lines.append(f"**Всего тестов без требования:** {len(unlinked)}\n")
+
+    if not unlinked:
+        lines.append("_Нет тестов без привязки к требованиям._\n")
+        return "\n".join(lines)
+
+    lines.append("| Test Case | Title |")
+    lines.append("|-----------|-------|")
+    for tc in unlinked:
+        if isinstance(tc, dict):
+            tc_id = tc.get("test_case_id", "?")
+            title = tc.get("title", "")
+        else:
+            tc_id = str(tc)
+            title = ""
+        lines.append(f"| `{tc_id}` | {title} |")
+    lines.append("")
     return "\n".join(lines)
 
 
@@ -218,6 +258,12 @@ def save_reports(state: ReviewState) -> dict[str, Path]:
             path.write_text(generate_standards_markdown(state.standards_report), encoding="utf-8")
             saved["standards"] = path
 
+        unlinked = (state.sql_results or {}).get("unlinked_tests")
+        if unlinked:
+            path = REPORTS_DIR / f"report_unlinked_tests_{timestamp}.md"
+            path.write_text(generate_unlinked_tests_markdown(unlinked), encoding="utf-8")
+            saved["unlinked_tests"] = path
+
         summary_path = REPORTS_DIR / f"report_summary_{timestamp}.md"
         summary_path.write_text(generate_summary_markdown(state), encoding="utf-8")
         saved["summary"] = summary_path
@@ -229,66 +275,132 @@ def save_reports(state: ReviewState) -> dict[str, Path]:
     return saved
 
 
-def run_review(user_query: str) -> ReviewState:
+def run_review(
+    user_query: str,
+    thread_id: Optional[str] = None,
+    checkpointer: Optional[Any] = None,
+) -> ReviewState:
+    """Запускает ревью запроса.
+
+    Args:
+        user_query: текст запроса пользователя.
+        thread_id: идентификатор прогона для checkpoint/resume. Если не задан —
+            генерируется UUID. Тот же ``thread_id`` + ``checkpointer`` позволяют
+            возобновить прогон после сбоя с узла падения (C2).
+        checkpointer: LangGraph checkpointer. По умолчанию ``MemorySaver``
+            (в памяти процесса; для возобновления между перезапусками используйте
+            ``PostgresSaver``).
+
+    При сбое агента в середине прогона частично готовые отчёты всё равно
+    сохраняются (блок ``finally``), а состояние — в checkpointer для resume.
+    """
+    from langgraph.checkpoint.memory import MemorySaver
+
     settings = get_settings()
-    graph = build_graph()
+    if checkpointer is None:
+        checkpointer = MemorySaver()
+    graph = build_graph(checkpointer)
+
+    if thread_id is None:
+        thread_id = str(uuid.uuid4())
+    config = {"configurable": {"thread_id": thread_id}}
 
     scenario = "pending"
     agents = []
+    saved: dict[str, Path] = {}
+    state: ReviewState = ReviewState(user_query=user_query)
+    _run_status = "success"
+    _error_type: Optional[str] = None
     with trace_run(user_query, "pending", []) as run_span:
-        state = ReviewState(user_query=user_query)
-        state = graph.invoke(state)
+        try:
+            state = graph.invoke(state, config)
+            # Статус прогона: routing не определил сценарий → нужна
+            # переформулировка; частичный анализ стандартов → partial.
+            state_errors = _state_get(state, "errors") or []
+            if any("routing_failed" in e for e in state_errors):
+                _run_status = "needs_clarification"
+            else:
+                std = _state_get(state, "standards_report")
+                if std and _state_get(std, "partial"):
+                    _run_status = "partial"
+        except Exception as _exc:
+            _run_status = "error"
+            _error_type = type(_exc).__name__
+            logger.exception("Graph run failed mid-execution (thread_id=%s)", thread_id)
+            # C2: подхватываем последнее сохранённое состояние (частичные отчёты)
+            snapshot = graph.get_state(config)
+            if snapshot is not None and snapshot.values is not None:
+                try:
+                    state = ReviewState.model_validate(snapshot.values)
+                except Exception:
+                    logger.exception("Failed to restore partial state from checkpoint")
+            raise
+        finally:
+            # C2: сохраняем частичные отчёты даже при сбое любого агента
+            try:
+                saved = save_reports(state)
+            except Exception:
+                logger.exception("Failed to save partial reports after graph run")
 
-        def _get(obj, attr, default=None):
-            if isinstance(obj, dict):
-                return obj.get(attr, default)
-            return getattr(obj, attr, default)
+            # Метрики фиксируются ВСЕГДА (успех и ERROR): дефект из ревью §9 —
+            # ранее блок был недостижим при исключении, и $/токены терялись.
+            try:
+                if run_span is not None:
+                    def _get(obj, attr, default=None):
+                        if isinstance(obj, dict):
+                            return obj.get(attr, default)
+                        return getattr(obj, attr, default)
 
-        if run_span is not None:
-            scenario = _get(state, "scenario") or "unknown"
-            agents = _get(state, "agents_to_run") or []
-            run_span.set_attribute("qa.scenario", scenario)
-            run_span.set_attribute("qa.agents", ",".join(agents))
-            run_span.set_attribute("qa.requirement_ids", ",".join(_get(state, "requirement_ids") or []))
-            cov = _get(state, "coverage_report")
-            des = _get(state, "design_report")
-            std = _get(state, "standards_report")
-            if cov:
-                run_span.set_attribute("qa.coverage_pct", float(cov.total_coverage))
-            if des:
-                run_span.set_attribute("qa.design_score", float(des.overall_score))
-            if std:
-                run_span.set_attribute("qa.standards_compliance_pct", float(std.compliance_percentage))
-                run_span.set_attribute("qa.violations_count", len(std.violations))
+                    scenario = _get(state, "scenario") or "unknown"
+                    agents = _get(state, "agents_to_run") or []
+                    run_span.set_attribute("qa.run_status", _run_status)
+                    if _error_type:
+                        run_span.set_attribute("qa.error_type", _error_type)
+                    run_span.set_attribute("qa.scenario", scenario)
+                    run_span.set_attribute("qa.agents", ",".join(agents))
+                    run_span.set_attribute("qa.requirement_ids", ",".join(_get(state, "requirement_ids") or []))
+                    cov = _get(state, "coverage_report")
+                    des = _get(state, "design_report")
+                    std = _get(state, "standards_report")
+                    if cov:
+                        run_span.set_attribute("qa.coverage_pct", float(cov.total_coverage))
+                    if des:
+                        run_span.set_attribute("qa.design_score", float(des.overall_score))
+                    if std:
+                        run_span.set_attribute("qa.standards_compliance_pct", float(std.compliance_percentage))
+                        run_span.set_attribute("qa.violations_count", len(std.violations))
 
-            stats = get_run_stats()
-            run_span.set_attribute("qa.llm_calls", stats["llm_calls"])
-            run_span.set_attribute("qa.prompt_tokens", stats["prompt_tokens"])
-            run_span.set_attribute("qa.completion_tokens", stats["completion_tokens"])
-            run_span.set_attribute("qa.total_tokens", stats["prompt_tokens"] + stats["completion_tokens"])
-            pricing = settings.model_pricing
-            est_cost = 0.0
-            for model, toks in stats.get("by_model", {}).items():
-                price = pricing.get(model, {})
-                est_cost += (
-                    toks["prompt"] / 1_000_000 * price.get("input", 0)
-                    + toks["completion"] / 1_000_000 * price.get("output", 0)
-                )
-            run_span.set_attribute("qa.estimated_cost_usd", round(est_cost, 4))
+                    stats = get_run_stats()
+                    run_span.set_attribute("qa.llm_calls", stats["llm_calls"])
+                    run_span.set_attribute("qa.prompt_tokens", stats["prompt_tokens"])
+                    run_span.set_attribute("qa.completion_tokens", stats["completion_tokens"])
+                    run_span.set_attribute("qa.total_tokens", stats["prompt_tokens"] + stats["completion_tokens"])
+                    pricing = settings.model_pricing
+                    est_cost = 0.0
+                    for model, toks in stats.get("by_model", {}).items():
+                        price = pricing.get(model, {})
+                        est_cost += (
+                            toks["prompt"] / 1_000_000 * price.get("input", 0)
+                            + toks["completion"] / 1_000_000 * price.get("output", 0)
+                        )
+                    run_span.set_attribute("qa.estimated_cost_usd", round(est_cost, 4))
 
-            set_span_output(run_span, {
-                "scenario": scenario,
-                "session_id": get_current_session_id(),
-                "agents": agents,
-            }, mime_type="application/json")
+                    set_span_output(run_span, {
+                        "scenario": scenario,
+                        "session_id": get_current_session_id(),
+                        "agents": agents,
+                    }, mime_type="application/json")
 
-        saved = save_reports(state)
-        if run_span is not None:
-            run_span.set_attribute("qa.reports_saved", ",".join(saved.keys()))
+                    run_span.set_attribute("qa.reports_saved", ",".join(saved.keys()))
+            except Exception:
+                logger.exception("Failed to emit run metrics")
 
     print(f"\nOK: Отчёты сохранены в {REPORTS_DIR}")
     for name, path in saved.items():
         print(f"  - {name}: {path}")
     print(f"  - session: {get_current_session_id()}")
+
+    if _state_get(state, "final_answer"):
+        print("\n" + _state_get(state, "final_answer"))
 
     return state

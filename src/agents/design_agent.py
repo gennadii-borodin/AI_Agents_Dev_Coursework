@@ -1,11 +1,9 @@
 import json
 import logging
-import re
 from typing import Optional
 
-import json_repair
-
 from src.config import Settings, get_settings
+from src.json_utils import parse_json_response
 from src.llm_provider import RouterAIProvider
 from src.models import DesignReport, Requirement, TestCase
 from src.prompts import build_agent_system_prompt, build_json_schema
@@ -18,27 +16,6 @@ from src.tools.sql_tool import (
 
 logger = logging.getLogger(__name__)
 
-
-def _fix_json(text: str) -> str:
-    text = text.strip()
-    if not text.startswith("{"):
-        idx = text.find("{")
-        if idx >= 0:
-            text = text[idx:]
-    brace_count = text.count("{") - text.count("}")
-    if brace_count > 0:
-        text = text + "}" * brace_count
-    bracket_count = text.count("[") - text.count("]")
-    if bracket_count > 0:
-        text = text + "]" * bracket_count
-    if text.endswith(","):
-        text = text[:-1]
-    if not text.endswith("}"):
-        text = text + "}"
-    text = re.sub(r",\s*}", "}", text)
-    text = re.sub(r",\s*]", "]", text)
-    text = re.sub(r":\s*,", ": null,", text)
-    return text
 
 DESIGN_SYSTEM_PROMPT = build_agent_system_prompt("design_agent")
 
@@ -125,6 +102,36 @@ def run_design_agent(
         req_json = json.dumps(req_data, ensure_ascii=False)
         tc_json = json.dumps(tc_data, ensure_ascii=False)
 
+        # Детерминированная статическая валидация (revью T6, Этап 5): вместо
+        # LLM-гипотез о «валидности» тестов — реальные находки по структуре.
+        # Передаём их модели как достоверные факты, снижая долю галлюцинаций.
+        # Вызов идёт через ToolRegistry (единая точка диспетчеризации/валидации).
+        from src.skills import ToolRegistry
+
+        known_req_ids = {r["requirement_id"].upper() for r in req_data}
+        registry = ToolRegistry()
+        static = registry.execute_for_agent(
+            "design_agent",
+            "code_validator",
+            {
+                "test_cases": [tc.model_dump() for tc in test_cases],
+                "known_requirement_ids": known_req_ids,
+            },
+        )
+        if static.get("error"):
+            # Валидатор упал/недоступен — НЕ выдаём «проблем нет», иначе модель
+            # уверенно доложит, что тесты валидны. Явно помечаем отсутств жие факта.
+            logger.error(f"code_validator failed: {static['error']}")
+            static_block = f"(статический валидатор недоступен: {static['error']})"
+        else:
+            static_lines = [
+                f"- {f['test_case_id']}: {', '.join(f['issues'])}"
+                for f in static["findings"]
+            ]
+            static_block = (
+                "\n".join(static_lines) if static_lines else "(структурных проблем не найдено)"
+            )
+
         user_message = f"""Оцени качество тест-дизайна.
 
 ## Требования ({len(req_data)}):
@@ -132,6 +139,9 @@ def run_design_agent(
 
 ## Тест-кейсы ({len(tc_data)}):
 {tc_json}
+
+## Детерминированные находки статического валидатора (достоверны, не гадай):
+{static_block}
 
 Верни отчёт о качестве тест-дизайна в формате JSON."""
 
@@ -143,8 +153,6 @@ def run_design_agent(
                 {"role": "user", "content": user_message},
             ],
             model=settings.model_senior,
-            temperature=0.1,
-            max_tokens=16384,
             response_format={
                 "type": "json_schema",
                 "json_schema": {
@@ -157,45 +165,34 @@ def run_design_agent(
         if span is not None:
             span.set_attribute("llm.response.length", len(response) if response else 0)
 
-        try:
-            data = json.loads(response)
-            data = _normalize_design(data)
-            set_span_output(
-                span,
-                {"overall_score": data.get("overall_score")},
-                mime_type="application/json",
-            )
-            return DesignReport(**data)
-        except json.JSONDecodeError as e:
-            logger.warning(f"JSON parse error, attempting repair: {e}")
+        def _on_repair() -> None:
             if span is not None:
                 span.add_event("json_repaired", {"agent": "design", "tool": "json_repair"})
-            try:
-                repaired = json_repair.repair_json(response, return_objects=True)
-                if isinstance(repaired, str):
-                    data = json.loads(repaired)
-                elif isinstance(repaired, dict):
-                    data = repaired
-                else:
-                    raise ValueError(f"Unexpected type: {type(repaired)}")
-                data = _normalize_design(data)
-                set_span_output(
-                    span,
-                    {"overall_score": data.get("overall_score")},
-                    mime_type="application/json",
-                )
-                return DesignReport(**data)
-            except Exception as e2:
-                logger.error(f"Failed to repair JSON: {e2}")
-                logger.error(f"Raw response: {response[:500]}")
-                raise
+
+        try:
+            data = json.loads(response)
+        except json.JSONDecodeError:
+            data = parse_json_response(response, on_repair=_on_repair)
+
+        data = _normalize_design(data)
+        set_span_output(
+            span,
+            {"overall_score": data.get("overall_score")},
+            mime_type="application/json",
+        )
+        return DesignReport(**data)
 
 
 def _normalize_design(data: dict) -> dict:
     """Дозаполняет обязательные ключи, чтобы отчёт рендерился даже при
     обрезанном/неполном JSON-ответе модели (без KeyError в report.py)."""
     if not isinstance(data, dict):
-        return {"overall_score": 0.0}
+        # LLM вернул не объект (напр. JSON-массив) — бросаем, чтобы узел
+        # поймал ошибку и quality_gate повторил агента, вместо тихой
+        # генерации пустого отчёта с score=0.
+        raise ValueError(
+            f"Design LLM returned {type(data).__name__}, expected object"
+        )
     data.setdefault("overall_score", 0.0)
     data["techniques_applied"] = [
         {

@@ -163,9 +163,14 @@ class TestReportGeneration:
 
 
 class TestGraphRouting:
-    def test_router_scenarios(self):
+    def test_router_scenarios(self, monkeypatch):
         from src.graph import route_request
         from src.models import ReviewState
+        from tests.integration.helpers import ScriptedLLM, apply_llm_patch
+
+        # Маршрутизация — прерогатива LLM; используем scripted-LLM, чтобы
+        # тест не зависел от реального API (и не падал при его недоступности).
+        apply_llm_patch(monkeypatch, ScriptedLLM())
 
         test_cases = [
             ("провести полное ревью", "full_review", ["coverage", "design", "standards"]),

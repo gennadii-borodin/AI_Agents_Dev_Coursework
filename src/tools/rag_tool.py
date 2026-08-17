@@ -30,12 +30,12 @@ def rag_search(
                 query_embedding = embedding_provider.embed_text(query)
             except Exception as e:
                 logger.error(f"Failed to generate embedding: {e}")
-                return []
+                return {"results": [], "error": f"Failed to generate embedding: {e}"}
 
             table_name = collection
             if table_name not in ("requirements", "test_cases"):
                 logger.warning(f"Unknown collection: {collection}")
-                return []
+                return {"results": [], "error": f"Unknown collection: {collection}"}
 
             embedding_str = "[" + ",".join(map(str, query_embedding)) + "]"
 
@@ -73,48 +73,10 @@ def rag_search(
                             })
                         set_retrieval_documents(span, results)
                         set_span_output(span, {"count": len(results)})
-                        return results
+                        return {"results": results, "error": None}
             except Exception as e:
                 logger.error(f"RAG search failed: {e}")
-                return []
+                return {"results": [], "error": str(e)}
     except Exception:
-        return []
+        return {"results": [], "error": "unexpected error during rag_search"}
 
-
-def rag_search_by_requirement(
-    requirement_id: str,
-    top_k: int = 10,
-) -> list[dict[str, Any]]:
-    search_query = """
-    SELECT tc.test_case_id, tc.title, tc.description, tc.test_type, tc.priority, tc.req
-    FROM test_cases tc
-    WHERE tc.req = %s
-    ORDER BY tc.test_case_id
-    LIMIT %s
-    """
-    try:
-        with get_connection() as conn:
-            with conn.cursor() as cur:
-                cur.execute(search_query, (requirement_id, top_k))
-                rows = cur.fetchall()
-                return [
-                    {
-                        "id": row["test_case_id"],
-                        "title": row["title"],
-                        "content": row["description"],
-                        "test_type": row["test_type"],
-                        "priority": row["priority"],
-                        "req": row["req"],
-                    }
-                    for row in rows
-                ]
-    except Exception as e:
-        logger.error(f"RAG search by requirement failed: {e}")
-        return []
-
-
-def rag_search_related_requirements(
-    requirement_text: str,
-    top_k: int = 5,
-) -> list[dict[str, Any]]:
-    return rag_search("requirements", requirement_text, top_k)

@@ -1,75 +1,66 @@
 name: sql_query
-version: "1.0"
+version: "2.0"
 description: |
-  Skill для выполнения SQL-запросов к базе данных PostgreSQL.
-  Используется агентами для получения структурированных данных
-  о требованиях, тест-кейсах и их взаимосвязях.
+  Выполнение ТОЛЬКЙ read-only SQL-запросов (SELECT/WITH) к PostgreSQL.
+  Возвращает структурированные выборки требований и тест-кейсов.
+objective: |
+  Вернуть результат SELECT-запроса с метаданными (row_count, truncated, error).
+when_to_use: |
+  - Получить требования/тест-кейсы по фильтрам (ID, req, принадлежность).
+  - Точное извлечение по ID (в отличие от семантического rag_search).
+  - НЕ использовать для семантического поиска — для этого есть rag_search.
+input:
+  required: [query]
+  properties:
+    query:
+      type: string
+      description: >
+        ТОЛЬКО read-only запрос. Разрешены префиксы SELECT/WITH; мутации
+        (INSERT/UPDATE/DELETE/DROP/...) запрещены и отсекаются до выполнения.
+        Один statement (без ';').
+      allowlist_prefix: [SELECT, WITH]
+      forbidden_keywords: [INSERT, UPDATE, DELETE, DROP, CREATE, ALTER, TRUNCATE]
+      single_statement: true
+    params:
+      type: array
+      items:
+        type: string
+      nullable: true
+      description: Параметры запроса (параметризованные значения вместо конкатенации).
+output:
+  required: []
+  properties:
+    results:
+      type: array
+      items:
+        type: object
+    row_count:
+      type: integer
+    truncated:
+      type: boolean
+    error:
+      type: string
+      nullable: true
+returns: |
+  {"results": [...], "row_count": int, "truncated": bool, "error": null|string}.
+  При нарушении guardrails или сбое БД: {"results": [], "row_count": 0, "truncated": false, "error": "..."}.
+sop: |
+  1. Формируй ТОЛЬКО SELECT/WITH. Мутации запрещены (см. forbidden_keywords) и отсекаются до выполнения.
+  2. Используй параметризованные запросы через params при динамических значениях.
+  3. Проекция колонок уже исключает вектор-столбец embedding; не выбирай *.
+  4. Результат обрезается до 1000 строк (truncated=true при превышении).
+guardrails:
+  forbidden_actions:
+    - "Любые мутации БД: INSERT, UPDATE, DELETE, DROP, CREATE, ALTER, TRUNCATE"
+    - "Несколько statement через ';'"
+    - "Выборка вектор-столбца embedding"
+  requires_human_approval: false
+  notes: "Read-only контракт enforce-ится в реестре (skills.py:_check_sql) по allowlist_prefix + forbidden_keywords + single_statement. Обрезка числа строк управляется настройкой sql_max_rows (server-side)."
 
-system_prompt: |
-  Ты — SQL-инструмент. Твоя задача — выполнять безопасные SELECT-запросы
-  к базе данных PostgreSQL и возвращать результаты агентам.
-
-  ## Схема базы данных
-
-  ### Таблица requirements
-  - id: serial primary key
-  - requirement_id: varchar(20) unique
-  - title: varchar(255)
-  - requirement_text: text
-  - category: varchar(50)
-  - priority: varchar(20)
-  - qa_requirements_review: varchar(20)
-  - rejection_reason: text
-  - embedding: vector(1536)
-
-  ### Таблица test_cases
-  - id: serial primary key
-  - test_case_id: varchar(20) unique
-  - req: varchar(20)
-  - title: varchar(255)
-  - description: text
-  - preconditions: text
-  - test_data: text
-  - steps: text
-  - expected_result: text
-  - priority: varchar(20)
-  - test_type: varchar(50)
-  - design_quality: varchar(20)
-  - qa_review: varchar(20)
-  - review_comment: text
-  - embedding: vector(1536)
-
-  ## Правила безопасности
-  - Разрешены ТОЛЬКО SELECT-запросы
-  - Запрещены INSERT, UPDATE, DELETE, DROP, CREATE, ALTER
-  - Запрещены подзапросы с модификацией данных
-  - Результат автоматически ограничивается 1000 строк (MAX_SQL_ROWS)
-
-  ## Примеры запросов
-
-  ### Найти все тесты для требования
-  SELECT * FROM test_cases WHERE req = 'REQ-001'
-
-  ### Найти тесты без требований
-  SELECT * FROM test_cases WHERE req IS NULL OR req = ''
-
-  ### Посчитать покрытие по приоритетам
-  SELECT r.priority, COUNT(DISTINCT r.requirement_id) as total_reqs,
-         COUNT(DISTINCT tc.test_case_id) as total_tests
-  FROM requirements r
-  LEFT JOIN test_cases tc ON r.requirement_id = tc.req
-  GROUP BY r.priority
-
-  ### Найти дублирующие тесты
-  SELECT title, COUNT(*) as count
-  FROM test_cases
-  GROUP BY title
-  HAVING COUNT(*) > 1
-
-input_schema:
-  query: string
-
-output_schema:
-  results: list
-  row_count: int
-  error: optional[string]
+# Устойчивость вызовов (защита БД от runaway/каскадных сбоев).
+timeout_seconds: 5
+rate_limit:
+  max_calls_per_minute: 30
+circuit_breaker:
+  failure_threshold: 5
+  cooldown_seconds: 30

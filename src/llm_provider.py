@@ -21,6 +21,27 @@ from src.tracing import (
 logger = logging.getLogger(__name__)
 
 
+def _coerce_tool_results(tool_results: list[str]) -> str:
+    """Собирает результаты нескольких вызовов инструментов в единый валидный JSON.
+
+    ``invoke_with_tools`` может сделать несколько раундов tool_calls; результаты
+    каждого склеиваются. Простая склейка через ``\\n`` даёт невалидный JSON
+    («Extra data»), поэтому здесь каждый результат парсится и объединяется
+    в плоский список (для rag_search) либо список объектов.
+    """
+    combined: list = []
+    for tr in tool_results:
+        try:
+            obj = json.loads(tr)
+        except Exception:
+            continue
+        if isinstance(obj, list):
+            combined.extend(obj)
+        elif isinstance(obj, dict):
+            combined.append(obj)
+    return json.dumps(combined, ensure_ascii=False)
+
+
 def _on_retry(retry_state):
     """Добавляет событие повтора на текущий спан LLM (видно в трейсе)."""
     if not OTEL_AVAILABLE or _otel_trace is None:
@@ -41,14 +62,14 @@ def _on_retry(retry_state):
 class RouterAIProvider:
     def __init__(self, settings: Optional[Settings] = None):
         self.settings = settings or get_settings()
-        self.base_url = "https://routerai.ru/api/v1"
+        self.base_url = self.settings.routerai_base_url
         self.headers = {
             "Authorization": f"Bearer {self.settings.router_ai_api_key}",
             "Content-Type": "application/json",
         }
 
     @retry(
-        stop=stop_after_attempt(3),
+        stop=stop_after_attempt(get_settings().llm_retry_attempts),
         wait=wait_exponential(multiplier=1, min=2, max=10),
         reraise=True,
         before_sleep=_on_retry,
@@ -57,17 +78,19 @@ class RouterAIProvider:
         self,
         messages: list[dict[str, str]],
         model: Optional[str] = None,
-        temperature: float = 0.1,
+        temperature: Optional[float] = None,
         max_tokens: Optional[int] = None,
         json_mode: bool = False,
         response_format: Optional[dict[str, Any]] = None,
     ) -> str:
         model = model or self.settings.model_senior
+        temperature = self.settings.llm_temperature if temperature is None else temperature
+        max_tokens = self.settings.llm_max_tokens if max_tokens is None else max_tokens
         payload: dict[str, Any] = {
             "model": model,
             "messages": messages,
             "temperature": temperature,
-            "max_tokens": max_tokens or 8192,
+            "max_tokens": max_tokens,
         }
         if response_format is not None:
             payload["response_format"] = response_format
@@ -75,16 +98,23 @@ class RouterAIProvider:
             payload["response_format"] = {"type": "json_object"}
 
         with trace_llm(
-            model, messages, temperature, max_tokens or 8192, bool(response_format or json_mode)
+            model, messages, temperature, max_tokens, bool(response_format or json_mode)
         ) as span:
             try:
                 content, usage = self._do_request(payload)
             except Exception:
                 # Модель/провайдер может не поддерживать strict json_schema —
-                # откатываемся к обычному json_mode.
+                # откатываемся к json_object, затем (при повторном пустом
+                # ответе) к обычному режиму без response_format. Пустой
+                # контент для больших промптов (напр. Standards) иногда
+                # отдаётся именно в json-режимах, а в plain-режиме модель
+                # возвращает текст.
                 if response_format is not None and response_format.get("type") == "json_schema":
                     payload.pop("response_format", None)
                     payload["response_format"] = {"type": "json_object"}
+                    content, usage = self._do_request(payload)
+                elif response_format is not None:
+                    payload.pop("response_format", None)
                     content, usage = self._do_request(payload)
                 else:
                     raise
@@ -118,8 +148,18 @@ class RouterAIProvider:
                 data = response.json()
                 content = data["choices"][0]["message"].get("content")
                 if content is None or not str(content).strip():
-                    # Пустой ответ провайдера — бросаем, чтобы tenacity сделал
-                    # повторную попытку (и сработал фоллбэк json_schema -> json_mode).
+                    # Пустой ответ провайдера. Логируем finish_reason/usage,
+                    # чтобы диагностировать причину (обрыв по длине, отказ
+                    # модели сгенерировать JSON для слишком большого промпта и т.п.).
+                    finish = data["choices"][0].get("finish_reason")
+                    logger.warning(
+                        "LLM returned empty content (finish_reason=%s, usage=%s, model=%s)",
+                        finish,
+                        data.get("usage"),
+                        payload.get("model"),
+                    )
+                    # Бросаем, чтобы tenacity сделал повторную попытку и
+                    # сработал фоллбэк json_schema -> json_object -> plain.
                     raise ValueError("LLM provider returned empty content")
                 usage = data.get("usage", {}) or {}
                 return str(content).strip(), usage
@@ -170,11 +210,11 @@ class RouterAIProvider:
                 "messages": messages,
                 "tools": tools,
                 "tool_choice": tool_choice,
-                "temperature": 0.1,
+                "temperature": self.settings.llm_temperature,
             }
             try:
                 with trace_llm(
-                    model, messages, 0.1, self.settings.max_output_tokens, False
+                    model, messages, self.settings.llm_temperature, self.settings.llm_max_tokens, False
                 ) as span:
                     with httpx.Client(timeout=self.settings.llm_timeout_seconds) as client:
                         response = client.post(
@@ -203,8 +243,10 @@ class RouterAIProvider:
 
                     tool_calls = msg.get("tool_calls") or []
                     if not tool_calls:
-                        if return_tool_results and tool_results:
-                            return "\n".join(tool_results)
+                        if return_tool_results:
+                            # Нет вызовов инструментов — возвращаем пустой список,
+                            # чтобы вызывающий код получил валидный JSON.
+                            return _coerce_tool_results(tool_results) if tool_results else "[]"
                         return content
                     last_content = content
                     messages.append(msg)
@@ -228,5 +270,5 @@ class RouterAIProvider:
                 raise
 
         if return_tool_results and tool_results:
-            return "\n".join(tool_results)
+            return _coerce_tool_results(tool_results)
         return last_content

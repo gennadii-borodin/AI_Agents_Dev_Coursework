@@ -26,6 +26,13 @@ def test_normalize_design_fills_missing_keys():
     assert out["recommendations"] == []
 
 
-def test_normalize_design_handles_non_dict():
-    out = _normalize_design("not a dict")
-    assert out == {"overall_score": 0.0}
+def test_normalize_design_rejects_non_dict():
+    import pytest
+
+    # Невалидный формат ответа LLM (не объект) должен бросать ошибку,
+    # чтобы узел поймал её и quality_gate повторил агента (а не молча
+    # генерировал пустой отчёт с score=0).
+    with pytest.raises(ValueError):
+        _normalize_design("not a dict")
+    with pytest.raises(ValueError):
+        _normalize_design(["a", "b"])

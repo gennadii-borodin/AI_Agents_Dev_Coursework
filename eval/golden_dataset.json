@@ -1,0 +1,65 @@
+[
+  {
+    "id": "full_review_all",
+    "user_query": "провести полное ревью всех тестов",
+    "scenario": "full_review",
+    "agents_to_run": ["coverage", "design", "standards"]
+  },
+  {
+    "id": "full_review_complex",
+    "user_query": "проанализируй всё комплексно и выдай рекомендации",
+    "scenario": "full_review",
+    "agents_to_run": ["coverage", "design", "standards"]
+  },
+  {
+    "id": "coverage_review",
+    "user_query": "проверить покрытие требований",
+    "scenario": "coverage_review",
+    "agents_to_run": ["coverage"]
+  },
+  {
+    "id": "design_review",
+    "user_query": "оценить дизайн тестов",
+    "scenario": "design_review",
+    "agents_to_run": ["design"]
+  },
+  {
+    "id": "standards_review",
+    "user_query": "проверить соответствие стандартам",
+    "scenario": "standards_review",
+    "agents_to_run": ["standards"]
+  },
+  {
+    "id": "requirement_coverage_single",
+    "user_query": "проверить покрытие REQ-001",
+    "scenario": "requirement_coverage",
+    "agents_to_run": ["coverage", "design", "standards"],
+    "requirement_ids": ["REQ-001"]
+  },
+  {
+    "id": "requirement_coverage_multi",
+    "user_query": "проверить покрытие REQ-001 и REQ-002",
+    "scenario": "requirement_coverage",
+    "agents_to_run": ["coverage", "design", "standards"],
+    "requirement_ids": ["REQ-001", "REQ-002"]
+  },
+  {
+    "id": "design_with_context",
+    "user_query": "оценить дизайн тестов для корзины покупок",
+    "scenario": "design_review",
+    "agents_to_run": ["design"]
+  },
+  {
+    "id": "standards_with_context",
+    "user_query": "проверить стандарты для корзины покупок",
+    "scenario": "standards_review",
+    "agents_to_run": ["standards"]
+  },
+  {
+    "id": "find_unlinked_tests",
+    "user_query": "найти тесты без требований unlinked",
+    "scenario": "find_unlinked_tests",
+    "agents_to_run": [],
+    "unlinked_present": true
+  }
+]

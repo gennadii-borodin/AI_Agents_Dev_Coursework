@@ -11,12 +11,8 @@ logger = logging.getLogger(__name__)
 
 
 def main():
-    from src.tracing import init_phoenix
-    phoenix_ok = init_phoenix(project_name="qa-review")
-    if not phoenix_ok:
-        logger.warning("Phoenix tracing not available")
-
     from src.cli import main as cli_main
+
     cli_main()
 
 

@@ -1,5 +1,6 @@
 import logging
 import os
+import re
 import socket
 import time
 import uuid
@@ -7,6 +8,30 @@ from contextlib import contextmanager
 from typing import Any, Optional
 
 logger = logging.getLogger(__name__)
+
+# Паттерны чувствительных данных, которые НЕЛЬЗЯ писать в трассы (Phoenix/OTEL).
+# Standards-агент проверяет «secrets в test_data» (QA-TEST), поэтому в БД могут
+# быть секреты, попадающие в LLM-сообщения и результаты tool-вызовов.
+_SECRET_KEY_RE = re.compile(
+    r"(?i)(api[_-]?key|apikey|token|secret|password|passwd|pwd|client[_-]?secret|"
+    r"authorization|bearer)(\s*[:=]\s*['\"]?)([A-Za-z0-9_\-\.]{6,})"
+)
+_EMAIL_RE = re.compile(r"[\w.%+-]+@[\w.-]+\.\w+")
+_CARD_RE = re.compile(r"\b(\d{4}[ -]?\d{4}[ -]?\d{4}[ -]?\d{4})\b")
+
+
+def mask_sensitive(text: Any) -> Any:
+    """Маскирует PII/секреты в строке перед записью в спан.
+
+    Заменяет значения вида ``key=VALUE`` на ``key=***`` и автономные email/карты
+    на ``***``. Нестроковые значения возвращаются без изменений.
+    """
+    if not isinstance(text, str):
+        return text
+    text = _SECRET_KEY_RE.sub(lambda m: f"{m.group(1)}=***", text)
+    text = _EMAIL_RE.sub("***", text)
+    text = _CARD_RE.sub("***", text)
+    return text
 
 try:
     from openinference.semconv.trace import (
@@ -52,9 +77,14 @@ def get_run_stats() -> dict:
     return dict(_RUN_STATS)
 
 
-def _resolve_phoenix_endpoint() -> str:
-    """Определяем доступный gRPC endpoint для Phoenix."""
-    grpc_port = int(os.getenv("PHOENIX_GRPC_PORT", "4317"))
+def _resolve_phoenix_endpoint(override: Optional[str] = None, grpc_port: int = 4317) -> str:
+    """Определяем доступный gRPC endpoint для Phoenix.
+
+    Если задан ``override`` (из настроек ``phoenix_grpc_endpoint``), возвращаем
+    его как есть. Иначе пробуем авто-обнаружить доступный хост на ``grpc_port``.
+    """
+    if override:
+        return override
 
     hosts_to_try = ["host.docker.internal", "localhost", "127.0.0.1"]
 
@@ -85,7 +115,18 @@ def init_phoenix(project_name: Optional[str] = None) -> bool:
     if _PHOENIX_INITIALIZED:
         return _PROVIDER is not None
 
-    endpoint = _resolve_phoenix_endpoint()
+    endpoint_override: Optional[str] = None
+    grpc_port = int(os.getenv("PHOENIX_GRPC_PORT", "4317"))
+    try:
+        from src.config import get_settings
+
+        _settings = get_settings()
+        endpoint_override = _settings.phoenix_grpc_endpoint
+        grpc_port = _settings.phoenix_grpc_port
+    except Exception:
+        pass
+
+    endpoint = _resolve_phoenix_endpoint(endpoint_override, grpc_port)
     if not endpoint:
         logger.debug("Phoenix endpoint not reachable, tracing disabled")
         _PHOENIX_INITIALIZED = True
@@ -117,14 +158,6 @@ def init_phoenix(project_name: Optional[str] = None) -> bool:
         logger.debug(f"Phoenix tracing not available: {e}")
         _PHOENIX_INITIALIZED = True
         return False
-
-
-def get_tracer():
-    if _TRACER is not None:
-        return _TRACER
-    if OTEL_AVAILABLE:
-        return otel_trace.get_tracer("qa-review-agent")
-    return None
 
 
 def new_session_id(project_name: str = "qa-review") -> str:
@@ -193,7 +226,7 @@ def trace_run(query: str, scenario: str, agents: list[str], session_id: Optional
         kind=OpenInferenceSpanKindValues.AGENT,
         session_id=sid,
         attributes={
-            SpanAttributes.INPUT_VALUE: query,
+            SpanAttributes.INPUT_VALUE: mask_sensitive(query),
             SpanAttributes.INPUT_MIME_TYPE: "text/plain",
             "qa.scenario": scenario,
             "qa.agents": ",".join(agents),
@@ -233,7 +266,7 @@ def trace_llm(
     }
     input_value = {
         "messages": [
-            {"role": m.get("role"), "content": (m.get("content") or "")[:4000]}
+            {"role": m.get("role"), "content": mask_sensitive((m.get("content") or "")[:4000])}
             for m in messages
         ]
     }
@@ -245,7 +278,7 @@ def trace_llm(
             SpanAttributes.LLM_PROVIDER: "routerai",
             SpanAttributes.LLM_INVOCATION_PARAMETERS: _json(invocation),
             SpanAttributes.LLM_INPUT_MESSAGES: [
-                _json({"message": {"role": m.get("role"), "content": (m.get("content") or "")[:4000]}})
+                _json({"message": {"role": m.get("role"), "content": mask_sensitive((m.get("content") or "")[:4000])}})
                 for m in messages
             ],
             SpanAttributes.INPUT_VALUE: _json(input_value),
@@ -272,7 +305,7 @@ def trace_tool(name: str, parameters: dict, tool_type: str = "TOOL"):
         attributes={
             SpanAttributes.TOOL_NAME: name,
             SpanAttributes.TOOL_PARAMETERS: params_str,
-            SpanAttributes.INPUT_VALUE: _json(parameters),
+            SpanAttributes.INPUT_VALUE: mask_sensitive(_json(parameters)),
             SpanAttributes.INPUT_MIME_TYPE: "application/json",
         },
     ) as span:
@@ -315,10 +348,10 @@ def set_span_output(span, output: Any, mime_type: str = "text/plain"):
         return
     try:
         if isinstance(output, (dict, list)):
-            span.set_attribute(SpanAttributes.OUTPUT_VALUE, _json(output))
+            span.set_attribute(SpanAttributes.OUTPUT_VALUE, mask_sensitive(_json(output)))
             span.set_attribute(SpanAttributes.OUTPUT_MIME_TYPE, "application/json")
         else:
-            span.set_attribute(SpanAttributes.OUTPUT_VALUE, str(output)[:8000])
+            span.set_attribute(SpanAttributes.OUTPUT_VALUE, mask_sensitive(str(output)[:8000]))
             span.set_attribute(SpanAttributes.OUTPUT_MIME_TYPE, mime_type)
     except Exception:
         pass
@@ -351,7 +384,7 @@ def set_llm_output(span, content: str):
     try:
         span.set_attribute(
             SpanAttributes.LLM_OUTPUT_MESSAGES,
-            [_json({"message": {"role": "assistant", "content": str(content)[:4000]}})],
+            [_json({"message": {"role": "assistant", "content": mask_sensitive(str(content)[:4000])}})],
         )
     except Exception:
         pass
@@ -368,7 +401,7 @@ def set_retrieval_documents(span, documents: list[dict]):
                 "id": d.get("id"),
                 "score": d.get("similarity"),
                 "document": {
-                    "content": (d.get("content") or "")[:2000],
+                    "content": mask_sensitive((d.get("content") or "")[:2000]),
                     "metadata": {
                         "title": d.get("title"),
                         "category": d.get("category"),

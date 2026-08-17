@@ -29,14 +29,6 @@ class TestCase(BaseModel):
     review_comment: str = ""
 
 
-class Violation(BaseModel):
-    rule_id: str
-    severity: str
-    test_case_id: str
-    description: str
-    auto_fixable: bool = False
-
-
 class CoverageReport(BaseModel):
     total_coverage: float
     critical_coverage: float
@@ -65,6 +57,12 @@ class StandardsReport(BaseModel):
     blocking_violations: list[str] = Field(default_factory=list)
     auto_fix_available: list[str] = Field(default_factory=list)
     human_review_required: list[str] = Field(default_factory=list)
+    # Флаг частичного анализа: часть чанков не проанализировалась
+    # (исчерпаны retries LLM). compliance в этом случае считается только по
+    # проанализированным ТК и не завышается.
+    partial: bool = False
+    failed_chunks: int = 0
+    analyzed_test_cases: int = 0
 
 
 class ReviewState(BaseModel):
@@ -85,4 +83,6 @@ class ReviewState(BaseModel):
     sql_results: dict[str, list[dict[str, Any]]] = Field(default_factory=dict)
 
     errors: list[str] = Field(default_factory=list)
-    current_step: str = ""
+    unresolved_questions: list[str] = Field(default_factory=list)
+    iteration: int = 0
+    final_answer: str = ""

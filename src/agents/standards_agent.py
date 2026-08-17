@@ -1,14 +1,13 @@
 import functools
 import json
 import logging
-import re
 from pathlib import Path
 from typing import Any, Optional
 
-import json_repair
 import yaml
 
 from src.config import Settings, get_settings
+from src.json_utils import parse_json_response
 from src.llm_provider import RouterAIProvider
 from src.models import StandardsReport, TestCase
 from src.prompts import build_agent_system_prompt, build_json_schema
@@ -35,7 +34,29 @@ def rule_classification() -> tuple[frozenset, frozenset]:
     auto_fix = frozenset(r["id"] for r in rules if r.get("auto_fixable"))
     return blocking, auto_fix
 
+
+@functools.lru_cache(maxsize=None)
+def num_active_rules() -> int:
+    """Число активных правил QA-TEST из реестра (data/standards_rules.yaml).
+
+    Используется как знаменатель метрики compliance вместо магической
+    константы (M3).
+    """
+    return len(load_standards_rules().get("rules", []))
+
 STANDARDS_SYSTEM_PROMPT = build_agent_system_prompt("standards_agent")
+
+# Единый источник правил QA-TEST — data/standards_rules.yaml (T7, §1.3 ревью).
+# Инжектируем актуальные правила в системный промпт, чтобы исключить
+# дублирование/рассинхрон с hardcoded-текстом в prompts/standards_agent.yaml.
+_STANDARDS_RULES_TEXT = yaml.safe_dump(
+    load_standards_rules().get("rules", []), allow_unicode=True, sort_keys=False
+)
+STANDARDS_SYSTEM_PROMPT = (
+    STANDARDS_SYSTEM_PROMPT
+    + "\n\n## Действующие правила QA-TEST (источник: data/standards_rules.yaml):\n"
+    + _STANDARDS_RULES_TEXT
+)
 
 
 def _prepare_test_cases_data(test_cases: list[dict]) -> list[dict]:
@@ -57,47 +78,34 @@ def _prepare_test_cases_data(test_cases: list[dict]) -> list[dict]:
     return result
 
 
-def _fix_json(text: str) -> str:
-    text = text.strip()
-    if not text.startswith("{"):
-        idx = text.find("{")
-        if idx >= 0:
-            text = text[idx:]
-    brace_count = text.count("{") - text.count("}")
-    if brace_count > 0:
-        text = text + "}" * brace_count
-    bracket_count = text.count("[") - text.count("]")
-    if bracket_count > 0:
-        text = text + "]" * bracket_count
-    if text.endswith(","):
-        text = text[:-1]
-    if not text.endswith("}"):
-        text = text + "}"
-    text = re.sub(r",\s*}", "}", text)
-    text = re.sub(r",\s*]", "]", text)
-    text = re.sub(r":\s*,", ": null,", text)
-    return text
-
-
 def _parse_llm_response(response: str) -> dict:
-    try:
-        return json.loads(response)
-    except json.JSONDecodeError:
-        try:
-            repaired = json_repair.repair_json(response, return_objects=True)
-            if isinstance(repaired, str):
-                return json.loads(repaired)
-            elif isinstance(repaired, dict):
-                return repaired
-            else:
-                raise ValueError(f"Unexpected type: {type(repaired)}")
-        except Exception:
-            if OTEL_AVAILABLE and _otel_trace is not None:
-                s = _otel_trace.get_current_span()
-                if s is not None and s.is_recording():
-                    s.add_event("json_repaired", {"agent": "standards", "tool": "json_repair"})
-            fixed = _fix_json(response)
-            return json.loads(fixed)
+    def _on_repair() -> None:
+        if OTEL_AVAILABLE and _otel_trace is not None:
+            s = _otel_trace.get_current_span()
+            if s is not None and s.is_recording():
+                s.add_event("json_repaired", {"agent": "standards", "tool": "json_repair"})
+
+    return parse_json_response(response, on_repair=_on_repair)
+
+
+def _normalize_violations(raw: Any) -> list[dict]:
+    """Приводит ответ LLM к плоскому списку dict-нарушений.
+
+    Модель может вернуть ``violations`` как вложенный список
+    (напр. ``[[{...}, {...}]]``) или с не-dict элементами — без этой
+    нормализации последующий ``v.get("rule_id")`` падает (adversarial #3,
+    реальный сбой прогона). Рекурсивно «разворачиваем» списки и оставляем
+    только dict-элементы.
+    """
+    result: list[dict] = []
+    if not isinstance(raw, list):
+        return result
+    for item in raw:
+        if isinstance(item, dict):
+            result.append(item)
+        elif isinstance(item, list):
+            result.extend(_normalize_violations(item))
+    return result
 
 
 def _analyze_chunk(chunk_data: list[dict], llm: RouterAIProvider, settings: Settings) -> list[dict]:
@@ -111,7 +119,7 @@ def _analyze_chunk(chunk_data: list[dict], llm: RouterAIProvider, settings: Sett
             {"role": "user", "content": user_msg},
         ],
         model=settings.model_senior,
-        temperature=0.1,
+        max_tokens=settings.standards_max_tokens,
         response_format={
             "type": "json_schema",
             "json_schema": {
@@ -127,7 +135,7 @@ def _analyze_chunk(chunk_data: list[dict], llm: RouterAIProvider, settings: Sett
         return []
 
     data = _parse_llm_response(response)
-    return data.get("violations", [])
+    return _normalize_violations(data.get("violations", []))
 
 
 def run_standards_agent(
@@ -143,7 +151,7 @@ def run_standards_agent(
 
     from src.tracing import set_span_output, trace_agent
 
-    CHUNK_SIZE = 50
+    chunk_size = settings.agents_chunk_size
 
     with trace_agent(
         "Standards Agent",
@@ -165,27 +173,54 @@ def run_standards_agent(
 
         if span is not None:
             span.set_attribute("test_cases.count", len(test_cases))
-            span.set_attribute("chunk_size", CHUNK_SIZE)
+            span.set_attribute("chunk_size", chunk_size)
 
         all_violations = []
+        chunk_total = (len(tc_dicts) + chunk_size - 1) // chunk_size
+        max_iter = settings.standards_max_iterations
+        iteration = 0
+        analyzed_count = 0
+        failed_chunks = 0
 
-        for i in range(0, len(tc_dicts), CHUNK_SIZE):
-            chunk = tc_dicts[i:i + CHUNK_SIZE]
-            chunk_total = (len(tc_dicts) + CHUNK_SIZE - 1) // CHUNK_SIZE
-            logger.info(f"Analyzing standards chunk {i // CHUNK_SIZE + 1}/{chunk_total}")
-            chunk_violations = _analyze_chunk(chunk, llm, settings)
-            all_violations.extend(chunk_violations)
+        for i in range(0, len(tc_dicts), chunk_size):
+            # Защита от runaway-цикла (revью T4): жёсткий потолок итераций.
+            if max_iter and max_iter > 0 and iteration >= max_iter:
+                logger.warning(
+                    f"Standards analysis reached max_iterations={max_iter}, stopping early"
+                )
+                break
+            chunk = tc_dicts[i:i + chunk_size]
+            logger.info(f"Analyzing standards chunk {iteration + 1}/{chunk_total}")
+            try:
+                chunk_violations = _analyze_chunk(chunk, llm, settings)
+                all_violations.extend(chunk_violations)
+                analyzed_count += len(chunk)
+            except Exception as e:
+                # Провал чанка (исчерпаны retries LLM) — не падаем всем прогоном,
+                # а исключаем чанк из знаменателя compliance и помечаем partial.
+                logger.warning(f"Standards chunk {iteration + 1}/{chunk_total} failed: {e}")
+                failed_chunks += 1
+            iteration += 1
+
+        num_rules = num_active_rules()
+        if num_rules == 0:
+            logger.warning("standards_rules.yaml is empty; compliance set to 100.0")
+            compliance = 100.0
+        elif analyzed_count == 0:
+            # Все чанки упали — анализ не выполнен, compliance неизвестен.
+            compliance = 0.0
+        else:
+            total_checks = analyzed_count * num_rules
+            passed_checks = total_checks - len(all_violations)
+            compliance = (passed_checks / total_checks * 100) if total_checks > 0 else 100.0
+        compliance = max(0.0, min(100.0, compliance))
 
         if span is not None:
-            span.set_attribute("chunks.total", (len(tc_dicts) + CHUNK_SIZE - 1) // CHUNK_SIZE)
+            span.set_attribute("chunks.total", chunk_total)
+            span.set_attribute("chunks.failed", failed_chunks)
+            span.set_attribute("analyzed_test_cases", analyzed_count)
             span.set_attribute("violations.total", len(all_violations))
-            set_span_output(span, {"compliance_percentage": round(
-                (len(test_cases) * 9 - len(all_violations)) / (len(test_cases) * 9) * 100
-                if test_cases else 100.0, 1)}, mime_type="application/json")
-
-    total_checks = len(test_cases) * 9
-    passed_checks = total_checks - len(all_violations)
-    compliance = (passed_checks / total_checks * 100) if total_checks > 0 else 100.0
+            set_span_output(span, {"compliance_percentage": compliance}, mime_type="application/json")
 
     blocking_rule_ids, auto_fix_rule_ids = rule_classification()
     blocking = [
@@ -212,4 +247,7 @@ def run_standards_agent(
         blocking_violations=blocking,
         auto_fix_available=auto_fix,
         human_review_required=human_review,
+        partial=(failed_chunks > 0),
+        failed_chunks=failed_chunks,
+        analyzed_test_cases=analyzed_count,
     )

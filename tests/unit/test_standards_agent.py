@@ -1,0 +1,190 @@
+"""Тесты метрики compliance (M3): знаменатель из числа правил, а не магическая 9."""
+
+import json
+
+import pytest
+
+from src.agents.standards_agent import num_active_rules, run_standards_agent
+from src.models import TestCase as QATestCase
+
+from tests.integration.helpers import ScriptedLLM, apply_llm_patch
+
+
+@pytest.fixture(autouse=True)
+def _clear_agent_caches():
+    """Снимает протечку lru-кэшей между тестами.
+
+    ``run_standards_agent`` наполняет ``rule_classification``/``num_active_rules``
+    кэш по мокнутому ``load_standards_rules``; без очистки после теста кэш
+    протекает в соседние тесты (test_prompts). Предсуществующий баг изоляции.
+    """
+    import src.agents.standards_agent as sa
+
+    yield
+    # rule_classification/num_active_rules — lru_cache, именно они протекают
+    # между тестами (test_prompts). load_standards_rules очищаем с защитой:
+    # в момент teardown он может быть ещё мокнут (lambda без cache_clear).
+    for fn in (sa.rule_classification, sa.num_active_rules, sa.load_standards_rules):
+        try:
+            fn.cache_clear()
+        except AttributeError:
+            pass
+
+
+def _make_tcs(n: int) -> list[QATestCase]:
+    return [
+        QATestCase(
+            test_case_id=f"TC-{i}",
+            req="REQ-001",
+            title="t",
+            description="",
+            preconditions="",
+            test_data="",
+            steps="",
+            expected_result="",
+            priority="Low",
+            test_type="Functional",
+            design_quality="Good",
+            qa_review="Passed",
+            review_comment="",
+        )
+        for i in range(n)
+    ]
+
+
+def test_num_active_rules_returns_rule_count(monkeypatch):
+    import src.agents.standards_agent as sa
+
+    rules = [{"id": f"R-{i}"} for i in range(5)]
+    monkeypatch.setattr(sa, "load_standards_rules", lambda: {"rules": rules})
+    sa.num_active_rules.cache_clear()
+    try:
+        assert num_active_rules() == 5
+    finally:
+        sa.num_active_rules.cache_clear()
+
+
+def test_compliance_denominator_uses_rule_count(monkeypatch):
+    import src.agents.standards_agent as sa
+
+    n_rules = 7
+    rules = [{"id": f"R-{i}", "blocking": False, "auto_fixable": False} for i in range(n_rules)]
+    monkeypatch.setattr(sa, "load_standards_rules", lambda: {"rules": rules})
+    sa.num_active_rules.cache_clear()
+    sa.rule_classification.cache_clear()
+
+    stub = ScriptedLLM()  # DEFAULT_STANDARDS => 2 нарушения
+    apply_llm_patch(monkeypatch, stub)
+
+    tcs = _make_tcs(3)
+    report = run_standards_agent(test_cases=tcs)
+
+    total = len(tcs) * n_rules
+    expected = round((total - 2) / total * 100, 1)
+    assert report.compliance_percentage == expected
+
+
+def test_compliance_empty_ruleset_is_100(monkeypatch):
+    import src.agents.standards_agent as sa
+
+    monkeypatch.setattr(sa, "load_standards_rules", lambda: {"rules": []})
+    sa.num_active_rules.cache_clear()
+    sa.rule_classification.cache_clear()
+
+    stub = ScriptedLLM()
+    apply_llm_patch(monkeypatch, stub)
+
+    report = run_standards_agent(test_cases=_make_tcs(3))
+    assert report.compliance_percentage == 100.0
+
+
+def test_compliance_clamped_to_zero(monkeypatch):
+    import src.agents.standards_agent as sa
+
+    rules = [{"id": "R-0"}]
+    monkeypatch.setattr(sa, "load_standards_rules", lambda: {"rules": rules})
+    sa.num_active_rules.cache_clear()
+    sa.rule_classification.cache_clear()
+
+    many_violations = json.dumps(
+        {
+            "violations": [
+                {"rule_id": "R-0", "test_case_id": f"TC-{i}", "description": "x"}
+                for i in range(10)
+            ]
+        }
+    )
+    stub = ScriptedLLM(standards_response=many_violations)
+    apply_llm_patch(monkeypatch, stub)
+
+    report = run_standards_agent(test_cases=_make_tcs(3))
+    assert 0.0 <= report.compliance_percentage <= 100.0
+
+
+def test_nested_list_violations_do_not_crash(monkeypatch):
+    """Реальный сбой: модель вернула violations как вложенный список
+    ([[{...},{...}]]). Должны развернуться без падения (adversarial #3)."""
+    import src.agents.standards_agent as sa
+
+    rules = [{"id": "R-0"}, {"id": "R-1"}]
+    monkeypatch.setattr(sa, "load_standards_rules", lambda: {"rules": rules})
+    sa.num_active_rules.cache_clear()
+    sa.rule_classification.cache_clear()
+
+    nested = json.dumps(
+        {
+            "violations": [
+                [
+                    {"rule_id": "R-0", "test_case_id": "TC-0", "description": "x"},
+                    {"rule_id": "R-1", "test_case_id": "TC-1", "description": "y"},
+                ]
+            ]
+        }
+    )
+    stub = ScriptedLLM(standards_response=nested)
+    apply_llm_patch(monkeypatch, stub)
+
+    report = run_standards_agent(test_cases=_make_tcs(3))
+    assert isinstance(report.violations, list)
+    assert len(report.violations) == 2
+    assert all(isinstance(v, dict) for v in report.violations)
+
+
+def test_standards_partial_on_chunk_failure(monkeypatch):
+    """Провал одного чанка (исчерпаны retries LLM) не рушит прогон:
+
+    - помечается partial=True, failed_chunks>0;
+    - провалившийся чанк исключается из знаменателя compliance;
+    - остальные чанки анализируются и попадают в отчёт.
+    """
+    import src.agents.standards_agent as sa
+
+    orig = sa._analyze_chunk
+    calls = {"n": 0}
+
+    def flaky(chunk, llm, settings):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("LLM provider returned empty content")
+        return orig(chunk, llm, settings)
+
+    monkeypatch.setattr(sa, "_analyze_chunk", flaky)
+
+    rules = [{"id": f"R-{i}"} for i in range(3)]
+    monkeypatch.setattr(sa, "load_standards_rules", lambda: {"rules": rules})
+    sa.num_active_rules.cache_clear()
+    sa.rule_classification.cache_clear()
+
+    # 60 ТК при chunk_size=50 → 2 чанка; первый упадёт, второй отработает.
+    stub = ScriptedLLM()
+    apply_llm_patch(monkeypatch, stub)
+
+    report = run_standards_agent(test_cases=_make_tcs(60))
+    assert report.partial is True
+    assert report.failed_chunks == 1
+    # первый чанк (50 ТК) упал и исключён, второй (10 ТК) проанализирован
+    assert report.analyzed_test_cases == 10
+    # compliance считается только по проанализированным 10 ТК
+    total = 10 * 3
+    expected = round((total - 2) / total * 100, 1)
+    assert report.compliance_percentage == expected

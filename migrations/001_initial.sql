@@ -5,6 +5,8 @@
 CREATE EXTENSION IF NOT EXISTS vector;
 
 -- Таблица требований
+DROP TABLE IF EXISTS test_cases;
+DROP TABLE IF EXISTS requirements;
 CREATE TABLE IF NOT EXISTS requirements (
     id SERIAL PRIMARY KEY,
     requirement_id VARCHAR(20) UNIQUE NOT NULL,
@@ -28,9 +30,9 @@ CREATE TABLE IF NOT EXISTS test_cases (
     test_data TEXT DEFAULT '',
     steps TEXT NOT NULL,
     expected_result TEXT NOT NULL,
-    priority VARCHAR(20) NOT NULL,
-    test_type VARCHAR(50) NOT NULL,
-    design_quality VARCHAR(20) NOT NULL,
+    priority TEXT NOT NULL,
+    test_type TEXT NOT NULL,
+    design_quality TEXT NOT NULL,
     qa_review VARCHAR(20) NOT NULL,
     review_comment TEXT DEFAULT '',
     embedding vector(1536)

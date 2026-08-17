@@ -11,6 +11,16 @@ from rich.progress import Progress
 
 from src.config import get_settings
 from src.embedding import EmbeddingProvider
+from src.tracing import (
+    OpenInferenceSpanKindValues,
+    get_current_session_id,
+    get_run_stats,
+    init_phoenix,
+    new_session_id,
+    set_span_output,
+    trace_run,
+    trace_span,
+)
 
 logger = logging.getLogger(__name__)
 console = Console()
@@ -55,51 +65,127 @@ def run_migration(
     settings = get_settings()
     data_dir = data_dir or (Path(__file__).parent.parent / "data")
 
-    console.print("[bold blue]Запуск миграции БД...[/bold blue]")
+    # Отдельная сессия мониторинга для процесса миграции (Phoenix),
+    # независимая от сессий ревью (qa-review-*). LLM-вызовы (эмбеддинги)
+    # попадают в эту же сессию как дочерние спаны.
+    session_id = new_session_id("db-migration")
+    init_phoenix(project_name="qa-migration")
 
-    try:
-        with psycopg.connect(settings.database_url) as conn:
-            register_vector(conn)
+    console.print(
+        f"[bold blue]Запуск миграции БД... (session: {session_id})[/bold blue]"
+    )
+    console.print(f"[cyan]Директория с данными: {data_dir}[/cyan]")
 
+    with trace_run(
+        "Миграция данных в PostgreSQL (requirements, test_cases)",
+        scenario="db_migration",
+        agents=["embedding", "load_data"],
+        session_id=session_id,
+    ) as run_span:
+        try:
+            _do_migration(settings, data_dir, skip_embeddings)
+        except Exception as e:
+            logger.exception("Migration failed")
+            console.print(f"[red]Ошибка: {e}[/red]")
+            if run_span is not None:
+                run_span.set_attribute("qa.run_status", "error")
+                run_span.set_attribute("qa.error_type", type(e).__name__)
+            sys.exit(1)
+        finally:
+            _emit_migration_metrics(run_span, settings)
+
+
+def _do_migration(settings, data_dir, skip_embeddings) -> None:
+    with psycopg.connect(settings.database_url) as conn:
+        with trace_span("Создание схемы БД", kind=OpenInferenceSpanKindValues.CHAIN) as span:
             migration_path = Path(__file__).parent.parent / "migrations" / "001_initial.sql"
+            console.print(f"[cyan]Файл миграции схемы: {migration_path}[/cyan]")
             migration_sql = migration_path.read_text(encoding="utf-8")
             conn.execute(migration_sql)
             console.print("[green]OK: Таблицы созданы[/green]")
 
-            embedding_provider = EmbeddingProvider(settings) if not skip_embeddings else None
+            register_vector(conn)
+            if span is not None:
+                set_span_output(
+                    span,
+                    {"tables": ["requirements", "test_cases"]},
+                    mime_type="application/json",
+                )
 
-            with conn.cursor() as cur:
-                cur.execute("SELECT COUNT(*) FROM requirements")
-                req_count = cur.fetchone()[0]
-                if req_count > 0:
-                    console.print("[yellow]WARN: Данные уже загружены.[/yellow]")
-                    if embedding_provider:
-                        _backfill_embeddings(conn, embedding_provider)
-                    else:
-                        console.print("[green]OK: Пропуск эмбеддингов.[/green]")
-                    return
+        embedding_provider = EmbeddingProvider(settings) if not skip_embeddings else None
 
-            requirements_file = data_dir / "requirements.csv"
-            if requirements_file.exists():
+        with conn.cursor() as cur:
+            cur.execute("SELECT COUNT(*) FROM requirements")
+            req_count = cur.fetchone()[0]
+            if req_count > 0:
+                console.print("[yellow]WARN: Данные уже загружены.[/yellow]")
+                if embedding_provider:
+                    _backfill_embeddings(conn, embedding_provider)
+                else:
+                    console.print("[green]OK: Пропуск эмбеддингов.[/green]")
+                conn.commit()
+                return
+
+        requirements_file = data_dir / "requirements.csv"
+        if requirements_file.exists():
+            console.print(f"[cyan]Загрузка данных из файла: {requirements_file}[/cyan]")
+            with trace_span("Загрузка требований", kind=OpenInferenceSpanKindValues.CHAIN) as span:
                 _load_requirements(conn, requirements_file, embedding_provider, skip_embeddings)
                 console.print("[green]OK: Требования загружены[/green]")
-            else:
-                console.print("[red]ERR: Файл requirements.csv не найден[/red]")
+                if span is not None:
+                    set_span_output(span, {"file": str(requirements_file)}, mime_type="text/plain")
+        else:
+            console.print("[red]ERR: Файл requirements.csv не найден[/red]")
 
-            test_cases_file = data_dir / "online_store_test_cases.csv"
-            if test_cases_file.exists():
+        test_cases_file = data_dir / "online_store_test_cases.csv"
+        if test_cases_file.exists():
+            console.print(f"[cyan]Загрузка данных из файла: {test_cases_file}[/cyan]")
+            with trace_span("Загрузка тест-кейсов", kind=OpenInferenceSpanKindValues.CHAIN) as span:
                 _load_test_cases(conn, test_cases_file, embedding_provider, skip_embeddings)
                 console.print("[green]OK: Тест-кейсы загружены[/green]")
-            else:
-                console.print("[red]✗ Файл online_store_test_cases.csv не найден[/red]")
+                if span is not None:
+                    set_span_output(span, {"file": str(test_cases_file)}, mime_type="text/plain")
+        else:
+            console.print("[red]✗ Файл online_store_test_cases.csv не найден[/red]")
 
-            conn.commit()
-            console.print("[bold green]OK: Миграция завершена![/bold green]")
+        conn.commit()
+        console.print("[bold green]OK: Миграция завершена![/bold green]")
 
-    except Exception as e:
-        logger.exception("Migration failed")
-        console.print(f"[red]Ошибка: {e}[/red]")
-        sys.exit(1)
+
+def _emit_migration_metrics(run_span, settings) -> None:
+    """Фиксирует метрики прогона миграции (LLM-вызовы, токены, $) на run-спане."""
+    if run_span is None:
+        return
+    try:
+        stats = get_run_stats()
+        run_span.set_attribute("qa.run_status", "success")
+        run_span.set_attribute("qa.llm_calls", stats["llm_calls"])
+        run_span.set_attribute("qa.prompt_tokens", stats["prompt_tokens"])
+        run_span.set_attribute("qa.completion_tokens", stats["completion_tokens"])
+        run_span.set_attribute("qa.total_tokens", stats["prompt_tokens"] + stats["completion_tokens"])
+
+        pricing = settings.model_pricing
+        est_cost = 0.0
+        for model, toks in stats.get("by_model", {}).items():
+            price = pricing.get(model, {})
+            est_cost += (
+                toks["prompt"] / 1_000_000 * price.get("input", 0)
+                + toks["completion"] / 1_000_000 * price.get("output", 0)
+            )
+        run_span.set_attribute("qa.estimated_cost_usd", round(est_cost, 4))
+
+        set_span_output(
+            run_span,
+            {
+                "session_id": get_current_session_id(),
+                "llm_calls": stats["llm_calls"],
+                "total_tokens": stats["prompt_tokens"] + stats["completion_tokens"],
+            },
+            mime_type="application/json",
+        )
+    except Exception:
+        logger.exception("Failed to emit migration metrics")
+    console.print(f"[cyan]Monitoring session: {get_current_session_id()}[/cyan]")
 
 
 def _load_requirements(
