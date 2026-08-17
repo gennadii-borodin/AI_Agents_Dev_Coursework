@@ -124,7 +124,7 @@ def route_request(state: ReviewState, settings: Optional[Settings] = None) -> Re
             "coverage_review": ["coverage"],
             "design_review": ["design"],
             "standards_review": ["standards"],
-            "requirement_coverage": ["coverage", "design", "standards"],
+            "requirement_coverage": ["coverage"],
             "find_unlinked_tests": [],
         }
 

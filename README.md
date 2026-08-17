@@ -41,10 +41,10 @@ python -m migrations.load_data
 
 ```bash
 # CLI режим
-qa-review run "провести полное ревью"
+qa-review "провести полное ревью"
 
 # Интерактивный режим
-qa-review run --interactive
+qa-review --interactive
 
 # Просмотр эффективных настроек (без секретов)
 qa-review --show-config

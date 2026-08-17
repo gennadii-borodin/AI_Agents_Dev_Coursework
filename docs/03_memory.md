@@ -26,14 +26,14 @@ erDiagram
     requirements ||--o{ test_cases : "req -> requirement_id"
 ```
 
-- Поле `embedding vector(1536)` в обеих таблицах (`001_initial.sql:17`, `:36`).
-- Индексы косинусного поиска: `ivfflat (embedding vector_cosine_ops) WITH (lists = 100)` (`001_initial.sql:40-41`).
+- Поле `embedding vector(1536)` в обеих таблицах (`001_initial.sql:19`, `:38`).
+- Индексы косинусного поиска: `ivfflat (embedding vector_cosine_ops) WITH (lists = 100)` (`001_initial.sql:42-43`).
 
 ### 1.2 Генерация эмбеддингов (`src/embedding.py`)
 
 - `EmbeddingProvider.embed_text` → вызов `/embeddings` провайдера `RouterAI` с моделью `model_embedding` (`openai/text-embedding-3-small`, 1536-dim).
-- **Ручной кэш** `_embed_cache[(text, model)]` (`src/embedding.py:16`) — намеренно dict (а не `lru_cache` на сетевой функции), чтобы не кэшировать исключения и не ломать повторные попытки.
-- Повторы при сбое: декоратор `@retry(stop_after_attempt(3), wait_exponential)` на `_embed_uncached` (`src/embedding.py:19`).
+- **Ручной кэш** `_embed_cache[(text, model)]` (`src/embedding.py:14`) — намеренно dict (а не `lru_cache` на сетевой функции), чтобы не кэшировать исключения и не ломать повторные попытки.
+- Повторы при сбое: декоратор `@retry(stop_after_attempt(3), wait_exponential)` на `_embed_uncached` (`src/embedding.py:22`).
 - Каждый вызов обёрнут в спан `trace_embedding` с маскировкой чувствительных данных.
 
 ---
@@ -58,7 +58,7 @@ sequenceDiagram
 - `top_k` по умолчанию `rag_top_k=10` (`Settings`).
 - Возвращаемые поля адаптируются под коллекцию (для `requirements` — `requirement_text`/`category`; для `test_cases` — `description`/`test_type`).
 - Спан `trace_retriever` + `set_retrieval_documents` записывают найденные документы в Phoenix (OpenInference semconv).
-- **Безопасность retrieval:** при сбое эмбеддинга/БД/неизвестной коллекции — возврат `[]`, агент продолжает без RAG-контекста.
+- **Безопасность retrieval:** при сбое эмбеддинга/БД/неизвестной коллекции — возврат `{"results": [], "error": "..."}`, агент продолжает без RAG-контекста.
 
 ### 2.1 Точки вызова RAG
 - **Coverage Agent** — семантический поиск ТК, косвенно покрывающих требования (см. раздел 3), единственный вызывающий сторона `rag_search` в коде.
@@ -70,7 +70,7 @@ sequenceDiagram
 
 Retrieval не является «скрытым» автоматическим шагом — им **управляет сам агент** через function calling.
 
-Логика в Coverage Agent (`src/agents/coverage_agent.py:172-229`):
+Логика в Coverage Agent (`src/agents/coverage_agent.py:185-249`):
 
 ```mermaid
 flowchart TD

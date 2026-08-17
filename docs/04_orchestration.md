@@ -6,13 +6,13 @@
 
 ## 1. Используемый SDK — LangGraph
 
-Оркестрация построена на **LangGraph** (`langgraph.graph.StateGraph`, `src/graph.py:347`). Состояние — Pydantic-модель `ReviewState` (`src/models.py:76`), передающаяся между узлами. Checkpointer по умолчанию — `MemorySaver` (`src/report.py:297`), с возможностью `PostgresSaver` для resume между перезапусками.
+Оркестрация построена на **LangGraph** (`langgraph.graph.StateGraph`, `src/graph.py:350`). Состояние — Pydantic-модель `ReviewState` (`src/models.py:68`), передающаяся между узлами. Checkpointer по умолчанию — `MemorySaver` (`src/report.py:301`), с возможностью `PostgresSaver` для resume между перезапусками.
 
 ---
 
 ## 2. Последовательность выполнения (шаги графа)
 
-Граф собирается в `build_graph` (`src/graph.py:347`):
+Граф собирается в `build_graph` (`src/graph.py:350`):
 
 ```mermaid
 flowchart LR

@@ -74,7 +74,7 @@ flowchart TD
 - **Observe:** `quality_gate` считывает заполненность `coverage_report`/`design_report`/`standards_report` и принимает решение о retry или финализации.
 
 ### 3.2 Уровень инструментов (Tool-calling loop)
-Внутри агентов реализован цикл Reason → Act → Observe через `RouterAIProvider.invoke_with_tools` (`src/llm_provider.py:153`):
+Внутри агентов реализован цикл Reason → Act → Observe через `RouterAIProvider.invoke_with_tools` (`src/llm_provider.py:170`):
 
 ```mermaid
 sequenceDiagram
@@ -166,7 +166,7 @@ flowchart LR
     TOOLS -.spans.-> PHX
 ```
 
-### 5.2 Схема состояния (`ReviewState`, `src/models.py:76`)
+### 5.2 Схема состояния (`ReviewState`, `src/models.py:68`)
 
 ```mermaid
 classDiagram
