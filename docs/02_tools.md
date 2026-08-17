@@ -12,6 +12,17 @@
 2. строит OpenAI-совместимые определения tool из YAML-схемы (`build_tool_definition`, `src/skills.py:46`);
 3. по имени вызова (`execute` / `execute_to_json`) диспетчеризует в реальную реализацию из `src/tools/`.
 
+Каждый скилл теперь описывает **полный контракт** инструмента. Помимо
+`input_schema`/`output_schema` он несёт `objective`, `when_to_use`, `constraints`
+(`enum` / `allowlist_prefix` / `single_statement` / `min` / `max`), `sop`
+(пошаговая инструкция использования) и `guardrails` (запрещённые действия,
+необходимость human approval). `build_tool_definition` (`src/skills.py:46`)
+дополнительно вшивает `returns` / `sop` / `guardrails` прямо в поле
+`description` tool-определения — модель получает рабочую инструкцию, а не только
+тонкое описание. `ToolRegistry._validate` (`src/skills.py:87`) приводит аргументы
+к типам **и** проверяет объявленные `constraints`, выбрасывая `ValueError` при
+нарушении (ошибка ловится и деградирует на уровне агента/узла/графа).
+
 Сопоставление типов YAML → JSON Schema: `_TYPE_MAP` (`src/skills.py:11`). Обязательность параметра выводится из отсутствия префикса `optional[`.
 
 ### 1.1 Три реализованных инструмента
@@ -69,6 +80,10 @@ output_schema:
 
 ---
 
+> Поле `description` выше формируется `build_tool_definition` и теперь включает
+> также `Returns` / `SOP` / `Guardrails` из соответствующего `skills/*.yaml`,
+> чтобы модель видела контракт и ограничения использования инструмента.
+
 ## 3. SOP использования инструментов
 
 ### 3.1 SOP: `sql_query` (структурированное чтение из БД)
@@ -86,7 +101,7 @@ flowchart TD
     D -.exception.-> I[return error dict, log]
 ```
 
-- **Правило доступа:** только `SELECT`. Блок запрещённых ключевых слов (`src/tools/sql_tool.py:36`) отсекает мутации до обращения к БД.
+- **Правило доступа:** только `SELECT`. Блок запрещённых ключевых слов (`src/tools/sql_tool.py:36`) отсекает мутации до обращения к БД. Кроме того, уровень tool-реестра (`ToolRegistry._validate`) требует, чтобы запрос **начинался с `SELECT`/`WITH`/`EXPLAIN`** и состоял **из одного statement** (allowlist из `skills/sql_query.yaml`); `execute_sql` оставляет denylist как второй рубеж (defense-in-depth).
 - **Проекция колонок:** явные списки `REQUIREMENT_COLS` / `TEST_CASE_COLS` исключают тяжёлый вектор-столбец `vector(1536)` из выборки (защита от многомегабайтного payload).
 - **Лимит:** `sql_max_rows=1000` (`Settings`), признак `truncated` проставляется в результат.
 - **Использование:** `get_all_requirements`, `get_test_cases_by_reqs`, `get_tests_without_requirements` и др. (`src/tools/sql_tool.py:69+`).
@@ -130,6 +145,7 @@ Coverage-агент сам принимает решение о вызове RAG
 | `rag_search` | исключение БД | `return []` |
 | `code_validator` | — | не падает, возвращает `findings` |
 | `invoke_with_tools` | невалидный JSON аргументов | `args = {}` |
+| `ToolRegistry._validate` | нарушение `constraints` (enum / allowlist_prefix / несколько statement) | `raise ValueError` → ловится узлом/агентом, повтор через `quality_gate` |
 | LLM пустой ответ | `ValueError` | повтор через tenacity + фоллбэк json_schema→json_mode |
 | Агент (coverage/design) | LLM вернул не объект | `raise` → узел графа ловит → `quality_gate` retry |
 

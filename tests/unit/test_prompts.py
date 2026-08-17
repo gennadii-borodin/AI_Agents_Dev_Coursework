@@ -49,3 +49,16 @@ def test_recompute_coverage_from_matrix():
 def test_recompute_coverage_keeps_llm_values_when_no_matrix():
     data = {"total_coverage": 77.0, "critical_coverage": 100.0, "residual_risk": "low"}
     assert _recompute_coverage(data)["total_coverage"] == 77.0
+
+
+def test_recompute_coverage_never_zero_on_degenerate_priority():
+    # LLM вернул приоритет в другом регистре/пустой или weight=0:
+    # покрытие не должно превращаться в 0% при наличии отмеченных требований.
+    data = {
+        "matrix": [
+            {"requirement_id": "REQ-1", "priority": "critical", "covered": True},
+            {"requirement_id": "REQ-2", "priority": "", "weight": 0, "covered": True},
+        ]
+    }
+    out = _recompute_coverage(data)
+    assert 0.0 < out["total_coverage"] <= 100.0

@@ -1,13 +1,38 @@
 name: rag_search
-version: "1.0"
+version: "1.1"
 description: |
-  Skill для поиска релевантной информации через векторный поиск в pgvector.
-  Используется агентами для нахождения связанных требований и тест-кейсов.
-
+  Векторный семантический поиск похожих требований или тест-кейсов в pgvector.
+  Используется для нахождения косвенно покрывающих ТК и семантически близких артефактов.
+objective: |
+  Вернуть до top_k наиболее семантически близких документов коллекции с оценкой similarity.
+when_to_use: |
+  - Найти тест-кейсы, косвенно покрывающие требование (нет явной привязки REQ).
+  - Найти дубликаты/похожие ТК по смыслу.
+  - НЕ использовать для точного извлечения по ID — для этого есть sql_query.
 input_schema:
   collection: string
   query: string
   top_k: optional[int]
-
+constraints:
+  collection:
+    enum: [requirements, test_cases]
+  top_k:
+    min: 1
+    max: 50
 output_schema:
-  results: list
+  results: list[dict]   # [{id, title, content, category, priority, similarity:float}]
+  error: optional[string]
+returns: |
+  JSON-массив объектов results (либо {"error": "..."} при невалидных аргументах).
+  Каждый элемент: {id, title, content, category, priority, similarity (float 0..1, больше = ближе)}.
+  При сбое эмбеддинга/БД возвращает [] (без исключения) — вызывающий продолжает без RAG-контекста.
+sop: |
+  1. Убедись, что collection ∈ {requirements, test_cases}, иначе результат будет пустым.
+  2. Передай осмысленный текст запроса (заголовок+текст требования), не сырые ID.
+  3. Вызови инструмент; при пустом результате не гипотезируй покрытие — отметь отсутствие сигнала.
+guardrails:
+  forbidden_actions:
+    - "Не передавай collection, отличный от requirements/test_cases"
+    - "Не используй для мутации данных (только чтение)"
+  requires_human_approval: false
+  notes: "Тихий фоллбэк: при любом сбое возвращает []. Ошибка НЕ поднимается как exception."

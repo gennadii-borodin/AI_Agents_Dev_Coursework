@@ -44,7 +44,12 @@ def list_skill_names() -> list[str]:
 
 
 def build_tool_definition(skill: dict[str, Any]) -> dict[str, Any]:
-    """Строит OpenAI-совместимое описание tool из YAML скилла."""
+    """Строит OpenAI-совместимое описание tool из YAML скилла.
+
+    В описание (``description``), помимо базового summary, включаются SOP,
+    guardrails и контракт вывода (``returns``) — чтобы модель получала рабочую
+    инструкцию использования инструмента, а не только тонкое описание.
+    """
     props: dict[str, Any] = {}
     required: list[str] = []
     for param, spec in (skill.get("input_schema") or {}).items():
@@ -52,11 +57,32 @@ def build_tool_definition(skill: dict[str, Any]) -> dict[str, Any]:
         props[param] = _json_type_spec(spec_str)
         if not spec_str.strip().lower().startswith("optional"):
             required.append(param)
+
+    desc = (skill.get("description") or "").strip()
+    extras: list[str] = []
+    if skill.get("returns"):
+        extras.append("Returns:\n" + str(skill["returns"]).strip())
+    if skill.get("sop"):
+        extras.append("SOP:\n" + str(skill["sop"]).strip())
+    if skill.get("guardrails"):
+        gb = skill["guardrails"]
+        lines: list[str] = []
+        if gb.get("forbidden_actions"):
+            lines.append("Forbidden actions: " + "; ".join(gb["forbidden_actions"]))
+        if "requires_human_approval" in gb:
+            lines.append(f"Requires human approval: {gb['requires_human_approval']}")
+        if gb.get("notes"):
+            lines.append(str(gb["notes"]))
+        if lines:
+            extras.append("Guardrails:\n" + "\n".join(lines))
+    if extras:
+        desc = desc + "\n\n" + "\n\n".join(extras)
+
     return {
         "type": "function",
         "function": {
             "name": skill["name"],
-            "description": (skill.get("description") or "").strip(),
+            "description": desc,
             "parameters": {
                 "type": "object",
                 "properties": props,
@@ -99,6 +125,40 @@ class ToolRegistry:
                 except (TypeError, ValueError):
                     pass
             clean[key] = value
+
+        # Enforcement of declared constraints (single source of truth = skill YAML).
+        # При нарушении выбрасывается ValueError — ошибка ловится и деградирует
+        # на уровне агента/узла/графа (как и при missing required argument).
+        for key, cons in (self._skills[name].get("constraints") or {}).items():
+            if key not in clean or clean[key] is None:
+                continue
+            value = clean[key]
+            if "enum" in cons and value not in cons["enum"]:
+                raise ValueError(
+                    f"{name}.{key} must be one of {cons['enum']}, got {value!r}"
+                )
+            if "allowlist_prefix" in cons and isinstance(value, str):
+                up = value.strip().upper()
+                if not any(up.startswith(p) for p in cons["allowlist_prefix"]):
+                    raise ValueError(
+                        f"{name}.{key} must start with one of {cons['allowlist_prefix']}"
+                    )
+            if (
+                cons.get("single_statement")
+                and isinstance(value, str)
+                and ";" in value.rstrip(";").strip()
+            ):
+                raise ValueError(f"{name}.{key} must be a single SQL statement (no ';')")
+            if "min" in cons or "max" in cons:
+                try:
+                    num = int(value)
+                    if "min" in cons and num < cons["min"]:
+                        num = cons["min"]
+                    if "max" in cons and num > cons["max"]:
+                        num = cons["max"]
+                    clean[key] = num
+                except (TypeError, ValueError):
+                    pass
         return clean
 
     def execute(self, name: str, args: dict[str, Any]) -> Any:

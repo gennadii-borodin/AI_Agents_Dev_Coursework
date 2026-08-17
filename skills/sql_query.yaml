@@ -1,14 +1,38 @@
 name: sql_query
-version: "1.0"
+version: "1.1"
 description: |
-  Skill для выполнения SQL-запросов к базе данных PostgreSQL.
-  Используется агентами для получения структурированных данных
-  о требованиях, тест-кейсах и их взаимосвязях.
-
+  Выполнение ТОЛЬКО read-only SQL-запросов (SELECT/WITH) к PostgreSQL.
+  Возвращает структурированные выборки требований и тест-кейсов.
+objective: |
+  Вернуть результат SELECT-запроса с метаданными (row_count, truncated, error).
+when_to_use: |
+  - Получить требования/тест-кейсы по фильтрам (ID, req, принадлежность).
+  - Точное извлечение по ID (в отличие от семантического rag_search).
 input_schema:
   query: string
-
+  params: optional[list]
+constraints:
+  query:
+    allowlist_prefix: [SELECT, WITH, EXPLAIN]
+    single_statement: true
+    max_rows: 1000
 output_schema:
-  results: list
+  results: list[dict]
   row_count: int
+  truncated: bool
   error: optional[string]
+returns: |
+  {"results": [...], "row_count": int, "truncated": bool, "error": null|string}.
+  При нарушении guardrails или сбое БД: {"results": [], "row_count": 0, "truncated": false, "error": "..."}.
+sop: |
+  1. Формируй ТОЛЬКО SELECT/WITH. Мутации (INSERT/UPDATE/DELETE/DROP/...) запрещены и отсекаются до выполнения.
+  2. Используй параметризованные запросы через params при динамических значениях.
+  3. Проекция колонок уже исключает вектор-столбец embedding; не выбирай *.
+  4. Результат обрезается до 1000 строк (truncated=true при превышении).
+guardrails:
+  forbidden_actions:
+    - "Любые мутации БД: INSERT, UPDATE, DELETE, DROP, CREATE, ALTER, TRUNCATE"
+    - "Несколько statement через ';'"
+    - "Выборка вектор-столбца embedding (включена в проекцию запрещена)"
+  requires_human_approval: false
+  notes: "allowlist по префиксу SELECT/WITH + single_statement. Нарушение -> error, БД не трогается."

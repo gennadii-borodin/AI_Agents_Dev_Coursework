@@ -38,8 +38,11 @@ def _recompute_coverage(data: dict, settings: Optional[Settings] = None) -> dict
 
     LLM возвращает матрицу с флагом covered/weight/priority по каждому
     требованию; итоговые проценты и остаточный риск вычисляются детерминированно,
-    без полагания на арифметику модели. Вес берётся из поля ``weight`` матрицы,
-    а при его отсутствии — из ``settings.priority_weights`` по приоритету.
+    без полагания на арифметику модели.     Вес берётся из поля ``weight`` матрицы (если это положительное число),
+    а при его отсутствии/нулевом значении — из ``settings.priority_weights`` по
+    приоритету (сравнение регистронезависимое). Если приоритет не распознан,
+    требование получает вес 1.0, чтобы невалидный/пустой приоритет от LLM не
+    обнулял знаменатель и не превращал реальное покрытие в 0%.
     Пороги остаточного риска — из настроек.
     """
     if settings is None:
@@ -62,9 +65,13 @@ def _recompute_coverage(data: dict, settings: Optional[Settings] = None) -> dict
             w = float(m.get("weight") or 0.0)
         except (TypeError, ValueError):
             w = 0.0
-        if not w:
-            w = float(weights.get(str(m.get("priority") or "").strip(), 0.0))
-        return w
+        if w > 0:
+            return w
+        prio = str(m.get("priority") or "").strip().lower()
+        for k, v in weights.items():
+            if k.lower() == prio:
+                return float(v)
+        return 1.0
 
     total_w = sum(_w(m) for m in matrix)
     covered_w = sum(_w(m) for m in matrix if m.get("covered"))
