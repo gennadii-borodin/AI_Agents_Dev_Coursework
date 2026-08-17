@@ -204,7 +204,6 @@ def run_standards_node(state: ReviewState) -> dict:
 
 def run_find_unlinked_node(state: ReviewState) -> ReviewState:
     logger.info("Finding unlinked tests")
-    state.current_step = "find_unlinked_tests"
     registry = ToolRegistry()
     result = registry.execute(
         "sql_query",
@@ -261,15 +260,18 @@ def load_data_once(state: ReviewState, settings: Optional[Settings] = None) -> R
         {"scenario": state.scenario, "requirement_ids": ",".join(req_ids)},
         tool_type="CHAIN",
     ):
-        # requirement_coverage: базовое ядро — только запрошенные REQ + их ТК.
-        if state.scenario == "requirement_coverage" and req_ids:
+        # Если запрошены конкретные REQ — грузим только их (и их ТК) для
+        # ЛЮБОГО сценария, а не только requirement_coverage. Иначе load_data_once
+        # делал полную выгрузку и execute_sql шёл с params=None, игнорируя
+        # requirement_ids (см. трассу design_review + REQ-014).
+        if req_ids:
             if not state.requirements:
                 state.requirements = [Requirement(**r) for r in get_requirements_by_ids(req_ids)]
             if not state.test_cases:
                 state.test_cases = [TestCase(**t) for t in get_test_cases_by_reqs(req_ids)]
             return state
 
-        # Полная выгрузка для остальных сценариев (и requirement_coverage без REQ-id).
+        # Полная выгрузка только когда REQ-id не заданы.
         if not state.requirements:
             state.requirements = [Requirement(**r) for r in get_all_requirements()]
         if not state.test_cases:

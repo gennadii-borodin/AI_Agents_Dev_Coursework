@@ -1,14 +1,13 @@
 import functools
 import json
 import logging
-import re
 from pathlib import Path
 from typing import Any, Optional
 
-import json_repair
 import yaml
 
 from src.config import Settings, get_settings
+from src.json_utils import parse_json_response
 from src.llm_provider import RouterAIProvider
 from src.models import StandardsReport, TestCase
 from src.prompts import build_agent_system_prompt, build_json_schema
@@ -79,47 +78,14 @@ def _prepare_test_cases_data(test_cases: list[dict]) -> list[dict]:
     return result
 
 
-def _fix_json(text: str) -> str:
-    text = text.strip()
-    if not text.startswith("{"):
-        idx = text.find("{")
-        if idx >= 0:
-            text = text[idx:]
-    brace_count = text.count("{") - text.count("}")
-    if brace_count > 0:
-        text = text + "}" * brace_count
-    bracket_count = text.count("[") - text.count("]")
-    if bracket_count > 0:
-        text = text + "]" * bracket_count
-    if text.endswith(","):
-        text = text[:-1]
-    if not text.endswith("}"):
-        text = text + "}"
-    text = re.sub(r",\s*}", "}", text)
-    text = re.sub(r",\s*]", "]", text)
-    text = re.sub(r":\s*,", ": null,", text)
-    return text
-
-
 def _parse_llm_response(response: str) -> dict:
-    try:
-        return json.loads(response)
-    except json.JSONDecodeError:
-        try:
-            repaired = json_repair.repair_json(response, return_objects=True)
-            if isinstance(repaired, str):
-                return json.loads(repaired)
-            elif isinstance(repaired, dict):
-                return repaired
-            else:
-                raise ValueError(f"Unexpected type: {type(repaired)}")
-        except Exception:
-            if OTEL_AVAILABLE and _otel_trace is not None:
-                s = _otel_trace.get_current_span()
-                if s is not None and s.is_recording():
-                    s.add_event("json_repaired", {"agent": "standards", "tool": "json_repair"})
-            fixed = _fix_json(response)
-            return json.loads(fixed)
+    def _on_repair() -> None:
+        if OTEL_AVAILABLE and _otel_trace is not None:
+            s = _otel_trace.get_current_span()
+            if s is not None and s.is_recording():
+                s.add_event("json_repaired", {"agent": "standards", "tool": "json_repair"})
+
+    return parse_json_response(response, on_repair=_on_repair)
 
 
 def _normalize_violations(raw: Any) -> list[dict]:

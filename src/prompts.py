@@ -5,22 +5,9 @@ from typing import Any
 
 import yaml
 
+from src.json_utils import build_schema_from_spec
+
 _PROMPTS_DIR = Path(__file__).resolve().parent.parent / "prompts"
-
-_TYPE_MAP: dict[str, dict] = {
-    "string": {"type": "string"},
-    "int": {"type": "integer"},
-    "integer": {"type": "integer"},
-    "float": {"type": "number"},
-    "number": {"type": "number"},
-    "bool": {"type": "boolean"},
-    "boolean": {"type": "boolean"},
-    "list": {"type": "array"},
-}
-
-
-def _json_type_spec(type_hint: str) -> dict:
-    return dict(_TYPE_MAP.get((type_hint or "string").strip().lower(), {"type": "string"}))
 
 
 @functools.lru_cache(maxsize=None)
@@ -68,10 +55,4 @@ def build_agent_system_prompt(name: str) -> str:
 def build_json_schema(name: str) -> dict[str, Any]:
     """Строит JSON Schema (OpenAI-style) из output_schema YAML для structured outputs."""
     data = load_prompt(name)
-    schema = data.get("output_schema") or {}
-    properties = {key: _json_type_spec(str(spec)) for key, spec in schema.items()}
-    return {
-        "type": "object",
-        "properties": properties,
-        "required": list(schema.keys()),
-    }
+    return build_schema_from_spec(data.get("output_schema") or {})

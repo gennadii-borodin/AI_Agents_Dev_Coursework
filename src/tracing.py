@@ -160,14 +160,6 @@ def init_phoenix(project_name: Optional[str] = None) -> bool:
         return False
 
 
-def get_tracer():
-    if _TRACER is not None:
-        return _TRACER
-    if OTEL_AVAILABLE:
-        return otel_trace.get_tracer("qa-review-agent")
-    return None
-
-
 def new_session_id(project_name: str = "qa-review") -> str:
     return f"{project_name}-{uuid.uuid4().hex[:10]}"
 

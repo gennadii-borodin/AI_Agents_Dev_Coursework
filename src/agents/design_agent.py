@@ -1,11 +1,9 @@
 import json
 import logging
-import re
 from typing import Optional
 
-import json_repair
-
 from src.config import Settings, get_settings
+from src.json_utils import parse_json_response
 from src.llm_provider import RouterAIProvider
 from src.models import DesignReport, Requirement, TestCase
 from src.prompts import build_agent_system_prompt, build_json_schema
@@ -18,27 +16,6 @@ from src.tools.sql_tool import (
 
 logger = logging.getLogger(__name__)
 
-
-def _fix_json(text: str) -> str:
-    text = text.strip()
-    if not text.startswith("{"):
-        idx = text.find("{")
-        if idx >= 0:
-            text = text[idx:]
-    brace_count = text.count("{") - text.count("}")
-    if brace_count > 0:
-        text = text + "}" * brace_count
-    bracket_count = text.count("[") - text.count("]")
-    if bracket_count > 0:
-        text = text + "]" * bracket_count
-    if text.endswith(","):
-        text = text[:-1]
-    if not text.endswith("}"):
-        text = text + "}"
-    text = re.sub(r",\s*}", "}", text)
-    text = re.sub(r",\s*]", "]", text)
-    text = re.sub(r":\s*,", ": null,", text)
-    return text
 
 DESIGN_SYSTEM_PROMPT = build_agent_system_prompt("design_agent")
 
@@ -171,38 +148,22 @@ def run_design_agent(
         if span is not None:
             span.set_attribute("llm.response.length", len(response) if response else 0)
 
-        try:
-            data = json.loads(response)
-            data = _normalize_design(data)
-            set_span_output(
-                span,
-                {"overall_score": data.get("overall_score")},
-                mime_type="application/json",
-            )
-            return DesignReport(**data)
-        except json.JSONDecodeError as e:
-            logger.warning(f"JSON parse error, attempting repair: {e}")
+        def _on_repair() -> None:
             if span is not None:
                 span.add_event("json_repaired", {"agent": "design", "tool": "json_repair"})
-            try:
-                repaired = json_repair.repair_json(response, return_objects=True)
-                if isinstance(repaired, str):
-                    data = json.loads(repaired)
-                elif isinstance(repaired, dict):
-                    data = repaired
-                else:
-                    raise ValueError(f"Unexpected type: {type(repaired)}")
-                data = _normalize_design(data)
-                set_span_output(
-                    span,
-                    {"overall_score": data.get("overall_score")},
-                    mime_type="application/json",
-                )
-                return DesignReport(**data)
-            except Exception as e2:
-                logger.error(f"Failed to repair JSON: {e2}")
-                logger.error(f"Raw response: {response[:500]}")
-                raise
+
+        try:
+            data = json.loads(response)
+        except json.JSONDecodeError:
+            data = parse_json_response(response, on_repair=_on_repair)
+
+        data = _normalize_design(data)
+        set_span_output(
+            span,
+            {"overall_score": data.get("overall_score")},
+            mime_type="application/json",
+        )
+        return DesignReport(**data)
 
 
 def _normalize_design(data: dict) -> dict:

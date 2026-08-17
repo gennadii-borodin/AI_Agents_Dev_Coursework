@@ -1,11 +1,9 @@
 import json
 import logging
-import re
 from typing import Optional
 
-import json_repair
-
 from src.config import Settings, get_settings
+from src.json_utils import parse_json_response
 from src.llm_provider import RouterAIProvider
 from src.models import CoverageReport, Requirement, TestCase
 from src.prompts import build_agent_system_prompt, build_json_schema
@@ -20,19 +18,6 @@ from src.tools.sql_tool import (
 logger = logging.getLogger(__name__)
 
 
-def _fix_json(text: str) -> str:
-    text = text.strip()
-    if not text.startswith("{"):
-        idx = text.find("{")
-        if idx >= 0:
-            text = text[idx:]
-    if text.endswith(","):
-        text = text[:-1]
-    if not text.endswith("}"):
-        text = text + "}"
-    text = re.sub(r",\s*}", "}", text)
-    text = re.sub(r",\s*]", "]", text)
-    return text
 def _recompute_coverage(data: dict, settings: Optional[Settings] = None) -> dict:
     """Пересчитывает агрегаты покрытия в коде по матрице требований.
 
@@ -272,36 +257,21 @@ def run_coverage_agent(
         if span is not None:
             span.set_attribute("llm.response.length", len(response) if response else 0)
 
-        try:
-            data = json.loads(response)
-            # Агрегаты считаются в коде по матрице (LLM только классифицирует
-            # покрытие по каждому требованию), чтобы исключить ошибки вычислений.
-            data = _recompute_coverage(data, settings)
-            set_span_output(
-                span,
-                {"total_coverage": data.get("total_coverage")},
-                mime_type="application/json",
-            )
-            return CoverageReport(**data)
-        except json.JSONDecodeError:
+        def _on_repair() -> None:
             if span is not None:
                 span.add_event("json_repaired", {"agent": "coverage", "tool": "json_repair"})
-            try:
-                repaired = json_repair.repair_json(response, return_objects=True)
-                if isinstance(repaired, str):
-                    data = json.loads(repaired)
-                elif isinstance(repaired, dict):
-                    data = repaired
-                else:
-                    raise ValueError(f"Unexpected type: {type(repaired)}")
-                data = _recompute_coverage(data, settings)
-                set_span_output(
-                    span,
-                    {"total_coverage": data.get("total_coverage")},
-                    mime_type="application/json",
-                )
-                return CoverageReport(**data)
-            except Exception as e2:
-                logger.error(f"Failed to repair JSON: {e2}")
-                logger.error(f"Raw response: {response[:500]}")
-                raise
+
+        try:
+            data = json.loads(response)
+        except json.JSONDecodeError:
+            data = parse_json_response(response, on_repair=_on_repair)
+
+        # Агрегаты считаются в коде по матрице (LLM только классифицирует
+        # покрытие по каждому требованию), чтобы исключить ошибки вычислений.
+        data = _recompute_coverage(data, settings)
+        set_span_output(
+            span,
+            {"total_coverage": data.get("total_coverage")},
+            mime_type="application/json",
+        )
+        return CoverageReport(**data)

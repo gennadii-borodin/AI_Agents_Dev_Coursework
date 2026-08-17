@@ -29,14 +29,6 @@ class TestCase(BaseModel):
     review_comment: str = ""
 
 
-class Violation(BaseModel):
-    rule_id: str
-    severity: str
-    test_case_id: str
-    description: str
-    auto_fixable: bool = False
-
-
 class CoverageReport(BaseModel):
     total_coverage: float
     critical_coverage: float
@@ -91,16 +83,6 @@ class ReviewState(BaseModel):
     sql_results: dict[str, list[dict[str, Any]]] = Field(default_factory=dict)
 
     errors: list[str] = Field(default_factory=list)
-    current_step: str = ""
-
-    # Поля оркестрации/наблюдаемости (revью §4, Этап 4).
-    task_id: str = ""
-    user_goal: str = ""
-    input_artifact_refs: list[str] = Field(default_factory=list)
-    analysis_results: dict[str, Any] = Field(default_factory=dict)
-    violations_ref: str = ""
     unresolved_questions: list[str] = Field(default_factory=list)
-    tool_errors: list[str] = Field(default_factory=list)
     iteration: int = 0
-    max_iterations: int = 0
     final_answer: str = ""

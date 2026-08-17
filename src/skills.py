@@ -5,29 +5,9 @@ from typing import Any
 
 import yaml
 
+from src.json_utils import json_type_spec
+
 _SKILLS_DIR = Path(__file__).resolve().parent.parent / "skills"
-
-# Маппинг объявленных в YAML типов на JSON Schema (для function-calling).
-_TYPE_MAP: dict[str, dict] = {
-    "string": {"type": "string"},
-    "int": {"type": "integer"},
-    "integer": {"type": "integer"},
-    "float": {"type": "number"},
-    "number": {"type": "number"},
-    "bool": {"type": "boolean"},
-    "boolean": {"type": "boolean"},
-    "list": {"type": "array", "items": {}},
-}
-
-
-def _json_type_spec(type_hint: str) -> dict:
-    t = (type_hint or "string").strip().lower()
-    if t.startswith("optional["):
-        inner = t[len("optional[") : -1]
-        spec = dict(_TYPE_MAP.get(inner, {"type": "string"}))
-        spec["nullable"] = True
-        return spec
-    return dict(_TYPE_MAP.get(t, {"type": "string"}))
 
 
 @functools.lru_cache(maxsize=None)
@@ -54,7 +34,7 @@ def build_tool_definition(skill: dict[str, Any]) -> dict[str, Any]:
     required: list[str] = []
     for param, spec in (skill.get("input_schema") or {}).items():
         spec_str = str(spec)
-        props[param] = _json_type_spec(spec_str)
+        props[param] = json_type_spec(spec_str)
         if not spec_str.strip().lower().startswith("optional"):
             required.append(param)
 
@@ -126,7 +106,6 @@ class ToolRegistry:
                     pass
             clean[key] = value
 
-        # Enforcement of declared constraints (single source of truth = skill YAML).
         # При нарушении выбрасывается ValueError — ошибка ловится и деградирует
         # на уровне агента/узла/графа (как и при missing required argument).
         for key, cons in (self._skills[name].get("constraints") or {}).items():

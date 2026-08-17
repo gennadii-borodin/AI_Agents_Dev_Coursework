@@ -85,12 +85,6 @@ def get_requirements_by_ids(requirement_ids: list[str]) -> list[dict[str, Any]]:
     return result["results"] if result["error"] is None else []
 
 
-def get_test_cases_by_req(requirement_id: str) -> list[dict[str, Any]]:
-    query = f"SELECT {TEST_CASE_COLS} FROM test_cases WHERE req = %s ORDER BY test_case_id"
-    result = execute_sql(query, [requirement_id])
-    return result["results"] if result["error"] is None else []
-
-
 def get_test_cases_by_reqs(requirement_ids: list[str]) -> list[dict[str, Any]]:
     """Фильтрованная выборка — ровно те кейсы, что относятся к запрошенным REQ.
 
@@ -109,26 +103,3 @@ def get_tests_without_requirements() -> list[dict[str, Any]]:
     query = f"SELECT {TEST_CASE_COLS} FROM test_cases WHERE req IS NULL OR req = '' ORDER BY test_case_id"
     result = execute_sql(query)
     return result["results"] if result["error"] is None else []
-
-
-def get_coverage_stats() -> dict[str, Any]:
-    query = """
-    SELECT
-        r.priority,
-        COUNT(DISTINCT r.requirement_id) as total_reqs,
-        COUNT(DISTINCT tc.test_case_id) as total_tests
-    FROM requirements r
-    LEFT JOIN test_cases tc ON r.requirement_id = tc.req
-    GROUP BY r.priority
-    """
-    result = execute_sql(query)
-    if result["error"] or not result["results"]:
-        return {}
-
-    stats = {}
-    for row in result["results"]:
-        stats[row["priority"]] = {
-            "total_reqs": row["total_reqs"],
-            "total_tests": row["total_tests"],
-        }
-    return stats

@@ -1,4 +1,4 @@
-import functools
+
 import logging
 from typing import Optional
 
@@ -6,13 +6,11 @@ import httpx
 from tenacity import retry, stop_after_attempt, wait_exponential
 
 from src.config import Settings, get_settings
-from src.tracing import set_span_output, trace_embedding
+from src.tracing import set_span_output, set_span_tokens, trace_embedding
 
 logger = logging.getLogger(__name__)
 
-# Ручной кэш эмбеддингов по (text, model). Используется ручной dict (а не
-# lru_cache на функции с сетью), чтобы НЕ кэшировать исключения и не ломать
-# повторные попытки (§4 ревью: нет кэша эмбеддингов — 21 вызов/run).
+
 _embed_cache: dict[tuple[str, str], list[float]] = {}
 
 
@@ -56,6 +54,12 @@ class EmbeddingProvider:
 
         try:
             with trace_embedding(model, text) as span:
+                # Грубая оценка токенов (~4 символа/токен); точный usage
+                # зависит от провайдера и не всегда возвращается эндпоинтом.
+                prompt_tokens = max(1, len(text) // 4)
+                # Учитываем embedding-вызов как LLM-вызов в метриках прогона
+                # (используется мониторингом миграции и ревью).
+                set_span_tokens(span, prompt_tokens, 0, model)
                 set_span_output(
                     span,
                     {"dimensions": len(cached), "cache_hit": hit},
@@ -64,6 +68,3 @@ class EmbeddingProvider:
         except Exception:
             pass
         return cached
-
-    def embed_documents(self, documents: list[str]) -> list[list[float]]:
-        return [self.embed_text(doc) for doc in documents]
