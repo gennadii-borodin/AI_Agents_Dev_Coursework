@@ -105,15 +105,32 @@ def run_design_agent(
         # Детерминированная статическая валидация (revью T6, Этап 5): вместо
         # LLM-гипотез о «валидности» тестов — реальные находки по структуре.
         # Передаём их модели как достоверные факты, снижая долю галлюцинаций.
-        from src.tools.code_validator import validate_test_cases
+        # Вызов идёт через ToolRegistry (единая точка диспетчеризации/валидации).
+        from src.skills import ToolRegistry
 
         known_req_ids = {r["requirement_id"].upper() for r in req_data}
-        static = validate_test_cases([tc.model_dump() for tc in test_cases], known_req_ids)
-        static_lines = [
-            f"- {f['test_case_id']}: {', '.join(f['issues'])}"
-            for f in static["findings"]
-        ]
-        static_block = "\n".join(static_lines) if static_lines else "(структурных проблем не найдено)"
+        registry = ToolRegistry()
+        static = registry.execute_for_agent(
+            "design_agent",
+            "code_validator",
+            {
+                "test_cases": [tc.model_dump() for tc in test_cases],
+                "known_requirement_ids": known_req_ids,
+            },
+        )
+        if static.get("error"):
+            # Валидатор упал/недоступен — НЕ выдаём «проблем нет», иначе модель
+            # уверенно доложит, что тесты валидны. Явно помечаем отсутств жие факта.
+            logger.error(f"code_validator failed: {static['error']}")
+            static_block = f"(статический валидатор недоступен: {static['error']})"
+        else:
+            static_lines = [
+                f"- {f['test_case_id']}: {', '.join(f['issues'])}"
+                for f in static["findings"]
+            ]
+            static_block = (
+                "\n".join(static_lines) if static_lines else "(структурных проблем не найдено)"
+            )
 
         user_message = f"""Оцени качество тест-дизайна.
 

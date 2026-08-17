@@ -92,8 +92,10 @@ def test_prompt_injection_does_not_change_routing(monkeypatch, isolate_services)
 def test_sql_injection_via_tool_is_blocked():
     registry = ToolRegistry()
     malicious = "SELECT * FROM test_cases; DROP TABLE test_cases;"
-    out = registry.execute("sql_query", {"query": malicious})
-    assert out["error"] is not None  # forbidden keyword перехвачен
+    # Многострочный запрос отсекается валидацией (constraints.single_statement)
+    # ещё до выполнения — fail-closed.
+    with pytest.raises(ValueError):
+        registry._execute("sql_query", {"query": malicious})
 
 
 def test_adversarial_garbage_query_still_routes(patch_llm, isolate_services):
@@ -119,3 +121,39 @@ async def test_e2e_latency_under_threshold(app_graph):
     assert result.coverage_report is not None
     # С мокированным LLM и in-memory БД полный прогон должен быть быстрым.
     assert elapsed < 5.0, f"e2e took {elapsed:.2f}s"
+
+
+# --- Замечание #5: сбой code_validator не должен выдаваться за «всё чисто» ---
+
+
+def test_design_agent_surfaces_validator_error(monkeypatch, isolate_services):
+    from src.agents.design_agent import run_design_agent
+    from src.skills import ToolRegistry
+
+    stub = ScriptedLLM()
+    apply_llm_patch(monkeypatch, stub)
+
+    # Имитируем падение статического валидатора (напр. невалидные аргументы).
+    monkeypatch.setattr(
+        ToolRegistry,
+        "execute_for_agent",
+        lambda self, agent, name, args: {
+            "findings": [],
+            "checked": 0,
+            "error": "boom",
+        },
+    )
+
+    run_design_agent(llm=stub)
+
+    # Последнее обращение к design-агенту должно содержать текст об ошибке
+    # валидатора, а не «структурных проблем не найдено».
+    design_calls = [
+        messages
+        for kind, _model, messages in stub.calls
+        if kind == "chat" and "дизайн" in (messages[0].get("content") or "").lower()
+    ]
+    assert design_calls, "design-agent не обращался к LLM"
+    user_msg = design_calls[-1][1]["content"]
+    assert "boom" in user_msg
+    assert "недоступен" in user_msg

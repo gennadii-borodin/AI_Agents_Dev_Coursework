@@ -104,10 +104,17 @@ class RouterAIProvider:
                 content, usage = self._do_request(payload)
             except Exception:
                 # Модель/провайдер может не поддерживать strict json_schema —
-                # откатываемся к обычному json_mode.
+                # откатываемся к json_object, затем (при повторном пустом
+                # ответе) к обычному режиму без response_format. Пустой
+                # контент для больших промптов (напр. Standards) иногда
+                # отдаётся именно в json-режимах, а в plain-режиме модель
+                # возвращает текст.
                 if response_format is not None and response_format.get("type") == "json_schema":
                     payload.pop("response_format", None)
                     payload["response_format"] = {"type": "json_object"}
+                    content, usage = self._do_request(payload)
+                elif response_format is not None:
+                    payload.pop("response_format", None)
                     content, usage = self._do_request(payload)
                 else:
                     raise
@@ -141,8 +148,18 @@ class RouterAIProvider:
                 data = response.json()
                 content = data["choices"][0]["message"].get("content")
                 if content is None or not str(content).strip():
-                    # Пустой ответ провайдера — бросаем, чтобы tenacity сделал
-                    # повторную попытку (и сработал фоллбэк json_schema -> json_mode).
+                    # Пустой ответ провайдера. Логируем finish_reason/usage,
+                    # чтобы диагностировать причину (обрыв по длине, отказ
+                    # модели сгенерировать JSON для слишком большого промпта и т.п.).
+                    finish = data["choices"][0].get("finish_reason")
+                    logger.warning(
+                        "LLM returned empty content (finish_reason=%s, usage=%s, model=%s)",
+                        finish,
+                        data.get("usage"),
+                        payload.get("model"),
+                    )
+                    # Бросаем, чтобы tenacity сделал повторную попытку и
+                    # сработал фоллбэк json_schema -> json_object -> plain.
                     raise ValueError("LLM provider returned empty content")
                 usage = data.get("usage", {}) or {}
                 return str(content).strip(), usage

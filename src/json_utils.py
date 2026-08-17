@@ -14,6 +14,7 @@ import json_repair
 # structured outputs). Единый источник для prompts.py и skills.py.
 _TYPE_MAP: dict[str, dict] = {
     "string": {"type": "string"},
+    "str": {"type": "string"},
     "int": {"type": "integer"},
     "integer": {"type": "integer"},
     "float": {"type": "number"},
@@ -21,17 +22,38 @@ _TYPE_MAP: dict[str, dict] = {
     "bool": {"type": "boolean"},
     "boolean": {"type": "boolean"},
     "list": {"type": "array", "items": {}},
+    "dict": {"type": "object"},
 }
 
 
+def _resolve_type(type_hint: str) -> dict:
+    """Разрешает тип YAML в JSON Schema, включая обобщённые подсказки.
+
+    Поддерживает ``list[X]`` (массив с элементами типа X) и ``dict[...]``
+    (объект). Ранее ``list[dict]`` не находился в ``_TYPE_MAP`` и тихо
+    деградировал до ``{"type": "string"}``, из-за чего модель не видела форму
+    вложенных элементов в схеме tool/structured-output.
+    """
+    t = (type_hint or "string").strip()
+    low = t.lower()
+    if low.startswith("list[") and low.endswith("]"):
+        inner = t[len("list[") : -1].strip()
+        return {"type": "array", "items": _resolve_type(inner)}
+    if low.startswith("dict[") and low.endswith("]"):
+        return {"type": "object"}
+    return dict(_TYPE_MAP.get(low, {"type": "string"}))
+
+
 def json_type_spec(type_hint: str) -> dict:
-    t = (type_hint or "string").strip().lower()
-    if t.startswith("optional["):
-        inner = t[len("optional[") : -1]
-        spec = dict(_TYPE_MAP.get(inner, {"type": "string"}))
+    t = (type_hint or "string").strip()
+    optional = False
+    if t.lower().startswith("optional["):
+        optional = True
+        t = t[len("optional[") : -1].strip()
+    spec = _resolve_type(t)
+    if optional:
         spec["nullable"] = True
-        return spec
-    return dict(_TYPE_MAP.get(t, {"type": "string"}))
+    return spec
 
 
 def fix_json(text: str) -> str:

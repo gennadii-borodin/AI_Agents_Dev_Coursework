@@ -20,11 +20,17 @@ pytestmark = [pytest.mark.integration]
 
 # --- ToolRegistry: роутинг и валидация -------------------------------------
 def test_registry_runs_sql_query_against_isolated_db(monkeypatch):
+    from src.skills import _POLICY_CACHE
+
+    # Сбрасываем общий кэш политик устойчивости, чтобы тест не зависел от счётчиков
+    # rate limiter, накопленных другими тестами в рамках процесса (см. _POLICY_CACHE).
+    _POLICY_CACHE.clear()
+
     fake = make_fake_execute_sql(SAMPLE_REQUIREMENTS, SAMPLE_TEST_CASES)
     monkeypatch.setattr("src.tools.sql_tool.execute_sql", fake)
 
     registry = ToolRegistry()
-    result = registry.execute("sql_query", {"query": "SELECT * FROM test_cases"})
+    result = registry._execute("sql_query", {"query": "SELECT * FROM test_cases"})
     assert isinstance(result, dict)
     assert set(result.keys()) == {"results", "row_count", "truncated", "error"}
     assert result["error"] is None
@@ -44,20 +50,24 @@ def test_registry_rag_search_returns_list_or_graceful_empty(monkeypatch):
     monkeypatch.setattr(emb.EmbeddingProvider, "embed_text", _boom)
 
     registry = ToolRegistry()
-    out = registry.execute("rag_search", {"collection": "test_cases", "query": "логин", "top_k": 3})
-    assert isinstance(out, list)
-    assert out == []  # graceful degradation
+    out = registry._execute(
+        "rag_search", {"collection": "test_cases", "query": "логин", "top_k": 3}
+    )
+    # rag_search возвращает error-конверт (results/error), а не голый список.
+    assert isinstance(out, dict)
+    assert out["results"] == []  # graceful degradation
+    assert out.get("error")
 
 
 def test_registry_validates_required_args():
     registry = ToolRegistry()
     with pytest.raises(ValueError):
-        registry.execute("rag_search", {"query": "x"})  # нет collection
+        registry._execute("rag_search", {"query": "x"})  # нет collection
 
 
 def test_registry_unknown_tool_is_safe():
     registry = ToolRegistry()
-    assert "Unknown tool" in registry.execute("nope", {})
+    assert "Unknown tool" in registry._execute("nope", {})
     assert "Unknown tool" in registry.execute_to_json("nope", {})
 
 
@@ -76,9 +86,10 @@ def test_sql_forbids_destructive_keywords():
 
 def test_sql_injection_via_tool_is_rejected():
     registry = ToolRegistry()
-    # Попытка «инъекции» через tool-аргумент перехватывается на уровне execute_sql.
-    result = registry.execute("sql_query", {"query": "SELECT 1; DROP TABLE requirements;"})
-    assert result["error"] is not None
+    # Многострочный запрос отсекается на этапе валидации аргументов (constraints
+    # single_statement) ещё до обращения к БД — fail-closed на уровне _validate.
+    with pytest.raises(ValueError):
+        registry._execute("sql_query", {"query": "SELECT 1; DROP TABLE requirements;"})
 
 
 def test_sql_limits_result_rows(monkeypatch):

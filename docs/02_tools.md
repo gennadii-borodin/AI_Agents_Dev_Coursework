@@ -10,18 +10,29 @@
 
 1. загружает все `skills/*.yaml` (`load_skill` с `lru_cache`);
 2. строит OpenAI-совместимые определения tool из YAML-схемы (`build_tool_definition`, `src/skills.py:46`);
-3. по имени вызова (`execute` / `execute_to_json`) диспетчеризует в реальную реализацию из `src/tools/`.
+3. по имени вызова (`_execute` / `execute_to_json`) диспетчеризует через маппинг `_HANDLERS` в реальную реализацию из `src/tools/`.
 
 Каждый скилл теперь описывает **полный контракт** инструмента. Помимо
 `input_schema`/`output_schema` он несёт `objective`, `when_to_use`, `constraints`
 (`enum` / `allowlist_prefix` / `single_statement` / `min` / `max`), `sop`
 (пошаговая инструкция использования) и `guardrails` (запрещённые действия,
-необходимость human approval). `build_tool_definition` (`src/skills.py:46`)
-дополнительно вшивает `returns` / `sop` / `guardrails` прямо в поле
-`description` tool-определения — модель получает рабочую инструкцию, а не только
-тонкое описание. `ToolRegistry._validate` (`src/skills.py:87`) приводит аргументы
-к типам **и** проверяет объявленные `constraints`, выбрасывая `ValueError` при
-нарушении (ошибка ловится и деградирует на уровне агента/узла/графа).
+необходимость human approval). `build_tool_definition` (`src/skills.py`) строит
+OpenAI-совместимое определение и:
+- вшивает `objective` / `when_to_use` / `returns` / `sop` / `guardrails` прямо в
+  поле `description` — модель получает рабочую инструкцию и сигнал выбора;
+- **поднимает объявленные `constraints` в саму JSON-схему** аргументов
+  (`enum` → `enum`, `min`/`max` → `minimum`/`maximum`, `allowlist_prefix` →
+  `pattern`), чтобы модель была структурно ограничена ещё до рантайм-валидации.
+
+Диспетчеризация выполняется через data-driven маппинг `_HANDLERS`
+(skill-имя → callable из `src/tools`), а не ветвлением `if name ==`. Добавление
+нового скилла = дописать запись в `_HANDLERS`; код реестра не дублируется. Сами
+функции инструментов импортируются внутри обёрток в момент вызова, поэтому
+монkeypatch в тестах работает корректно.
+
+`ToolRegistry._validate` приводит аргументы к типам **и** проверяет объявленные
+`constraints`, выбрасывая `ValueError` при нарушении (ошибка ловится и деградирует
+на уровне агента/узла/графа).
 
 Сопоставление типов YAML → JSON Schema: `_TYPE_MAP` (`src/skills.py:11`). Обязательность параметра выводится из отсутствия префикса `optional[`.
 

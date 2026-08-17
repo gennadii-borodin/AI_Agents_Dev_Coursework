@@ -205,7 +205,8 @@ def run_standards_node(state: ReviewState) -> dict:
 def run_find_unlinked_node(state: ReviewState) -> ReviewState:
     logger.info("Finding unlinked tests")
     registry = ToolRegistry()
-    result = registry.execute(
+    result = registry.execute_for_agent(
+        "find_unlinked",
         "sql_query",
         {
             "query": (

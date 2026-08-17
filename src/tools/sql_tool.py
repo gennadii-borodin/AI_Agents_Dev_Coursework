@@ -12,7 +12,42 @@ logger = logging.getLogger(__name__)
 
 def get_connection() -> psycopg.Connection:
     settings = get_settings()
-    return psycopg.connect(settings.database_url, row_factory=dict_row)
+    # Server-side защита от зависших/долгих запросов. Клиентский таймаут
+    # (ThreadPoolExecutor) не прерывает блокирующий вызов БД, поэтому
+    # statement_timeout — реальный механизм отмены (см. Settings.sql_statement_timeout).
+    #
+    # Важно: statement_timeout задаётся через опцию подключения `-c`, а не
+    # оператором `SET statement_timeout = %s`. У `SET var = $1` psycopg не может
+    # вывести тип параметра ("could not determine data type of parameter $1"),
+    # команда падает, а т.к. это первый запрос в неявной транзакции — соединение
+    # переходит в состояние "current transaction is aborted", и все последующие
+    # SELECT на нём проваливаются. Опция `-c` применяется ДО начала транзакции и
+    # не может её прервать. Альтернативный вариант — autocommit (см. ниже).
+    try:
+        conn = psycopg.connect(
+            settings.database_url,
+            connect_timeout=settings.sql_connect_timeout,
+            row_factory=dict_row,
+            options=f"-c statement_timeout={settings.sql_statement_timeout}",
+        )
+    except Exception:  # noqa: BLE001
+        # Если опция не поддерживается (старый/проксирующий сервер), подключаемся
+        # без неё, чтобы не обрушивать весь пайп БД; защита по таймауту в этом
+        # случае ослабляется, но запросы выполняются.
+        logger.warning(
+            "Не удалось задать statement_timeout через опцию подключения; "
+            "подключаемся без неё"
+        )
+        conn = psycopg.connect(
+            settings.database_url,
+            connect_timeout=settings.sql_connect_timeout,
+            row_factory=dict_row,
+        )
+    # Read-only нагрузка: autocommit исключает висячие транзакции, поэтому даже
+    # при сбое отдельного запроса состояние "transaction aborted" не блокирует
+    # следующие вызовы на этом же соединении.
+    conn.autocommit = True
+    return conn
 
 
 MAX_SQL_ROWS = 1000
@@ -33,11 +68,11 @@ def execute_sql(query: str, params: Optional[list] = None, settings: Optional[Se
     if settings is None:
         settings = get_settings()
 
-    forbidden_keywords = ["INSERT", "UPDATE", "DELETE", "DROP", "CREATE", "ALTER", "TRUNCATE"]
-    query_upper = query.upper().strip()
-    for keyword in forbidden_keywords:
-        if keyword in query_upper:
-            return {"results": [], "row_count": 0, "error": f"Forbidden keyword: {keyword}"}
+    # Read-only контракт (allowlist_prefix/forbidden_keywords/single_statement)
+    # enforce-ится в реестре скиллов (src/skills.py:_check_sql) ДО вызова этого
+    # метода. Здесь дублировать проверку не нужно — иначе два источника истины
+    # расходятся. Внутренние выборки (get_all_*, get_requirements_by_ids, ...)
+    # и так формируют только SELECT.
 
     try:
         with trace_tool("execute_sql", {"query": query, "params": params}) as span:

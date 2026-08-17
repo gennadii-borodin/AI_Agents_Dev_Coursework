@@ -1,31 +1,51 @@
 name: sql_query
-version: "1.1"
+version: "2.0"
 description: |
-  Выполнение ТОЛЬКО read-only SQL-запросов (SELECT/WITH) к PostgreSQL.
+  Выполнение ТОЛЬКЙ read-only SQL-запросов (SELECT/WITH) к PostgreSQL.
   Возвращает структурированные выборки требований и тест-кейсов.
 objective: |
   Вернуть результат SELECT-запроса с метаданными (row_count, truncated, error).
 when_to_use: |
   - Получить требования/тест-кейсы по фильтрам (ID, req, принадлежность).
   - Точное извлечение по ID (в отличие от семантического rag_search).
-input_schema:
-  query: string
-  params: optional[list]
-constraints:
-  query:
-    allowlist_prefix: [SELECT, WITH, EXPLAIN]
-    single_statement: true
-    max_rows: 1000
-output_schema:
-  results: list[dict]
-  row_count: int
-  truncated: bool
-  error: optional[string]
+  - НЕ использовать для семантического поиска — для этого есть rag_search.
+input:
+  required: [query]
+  properties:
+    query:
+      type: string
+      description: >
+        ТОЛЬКО read-only запрос. Разрешены префиксы SELECT/WITH; мутации
+        (INSERT/UPDATE/DELETE/DROP/...) запрещены и отсекаются до выполнения.
+        Один statement (без ';').
+      allowlist_prefix: [SELECT, WITH]
+      forbidden_keywords: [INSERT, UPDATE, DELETE, DROP, CREATE, ALTER, TRUNCATE]
+      single_statement: true
+    params:
+      type: array
+      items:
+        type: string
+      nullable: true
+      description: Параметры запроса (параметризованные значения вместо конкатенации).
+output:
+  required: []
+  properties:
+    results:
+      type: array
+      items:
+        type: object
+    row_count:
+      type: integer
+    truncated:
+      type: boolean
+    error:
+      type: string
+      nullable: true
 returns: |
   {"results": [...], "row_count": int, "truncated": bool, "error": null|string}.
   При нарушении guardrails или сбое БД: {"results": [], "row_count": 0, "truncated": false, "error": "..."}.
 sop: |
-  1. Формируй ТОЛЬКО SELECT/WITH. Мутации (INSERT/UPDATE/DELETE/DROP/...) запрещены и отсекаются до выполнения.
+  1. Формируй ТОЛЬКО SELECT/WITH. Мутации запрещены (см. forbidden_keywords) и отсекаются до выполнения.
   2. Используй параметризованные запросы через params при динамических значениях.
   3. Проекция колонок уже исключает вектор-столбец embedding; не выбирай *.
   4. Результат обрезается до 1000 строк (truncated=true при превышении).
@@ -33,6 +53,14 @@ guardrails:
   forbidden_actions:
     - "Любые мутации БД: INSERT, UPDATE, DELETE, DROP, CREATE, ALTER, TRUNCATE"
     - "Несколько statement через ';'"
-    - "Выборка вектор-столбца embedding (включена в проекцию запрещена)"
+    - "Выборка вектор-столбца embedding"
   requires_human_approval: false
-  notes: "allowlist по префиксу SELECT/WITH + single_statement. Нарушение -> error, БД не трогается."
+  notes: "Read-only контракт enforce-ится в реестре (skills.py:_check_sql) по allowlist_prefix + forbidden_keywords + single_statement. Обрезка числа строк управляется настройкой sql_max_rows (server-side)."
+
+# Устойчивость вызовов (защита БД от runaway/каскадных сбоев).
+timeout_seconds: 5
+rate_limit:
+  max_calls_per_minute: 30
+circuit_breaker:
+  failure_threshold: 5
+  cooldown_seconds: 30

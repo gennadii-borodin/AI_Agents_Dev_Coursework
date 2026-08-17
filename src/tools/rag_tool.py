@@ -30,12 +30,12 @@ def rag_search(
                 query_embedding = embedding_provider.embed_text(query)
             except Exception as e:
                 logger.error(f"Failed to generate embedding: {e}")
-                return []
+                return {"results": [], "error": f"Failed to generate embedding: {e}"}
 
             table_name = collection
             if table_name not in ("requirements", "test_cases"):
                 logger.warning(f"Unknown collection: {collection}")
-                return []
+                return {"results": [], "error": f"Unknown collection: {collection}"}
 
             embedding_str = "[" + ",".join(map(str, query_embedding)) + "]"
 
@@ -73,10 +73,10 @@ def rag_search(
                             })
                         set_retrieval_documents(span, results)
                         set_span_output(span, {"count": len(results)})
-                        return results
+                        return {"results": results, "error": None}
             except Exception as e:
                 logger.error(f"RAG search failed: {e}")
-                return []
+                return {"results": [], "error": str(e)}
     except Exception:
-        return []
+        return {"results": [], "error": "unexpected error during rag_search"}
 

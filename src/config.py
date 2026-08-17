@@ -68,6 +68,12 @@ class Settings(BaseSettings):
     # Пороги бизнес-логики агентов.
     agents_chunk_size: int = 50
     sql_max_rows: int = 1000
+    sql_connect_timeout: int = 5
+    # Server-side лимит времени выполнения запроса (ms). Дублирует
+    # timeout_seconds скилла sql_query: клиентский ThreadPoolExecutor не может
+    # прервать блокирующий вызов Postgres, поэтому настоящая защита от
+    # зависшего запроса — statement_timeout на стороне БД.
+    sql_statement_timeout: int = 5000
     priority_weights: dict = {
         "Critical": 3,
         "High": 2,

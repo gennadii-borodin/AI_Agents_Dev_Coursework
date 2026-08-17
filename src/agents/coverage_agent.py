@@ -83,6 +83,27 @@ def _recompute_coverage(data: dict, settings: Optional[Settings] = None) -> dict
 COVERAGE_SYSTEM_PROMPT = build_agent_system_prompt("coverage_agent")
 
 
+def _flatten_rag_results(raw: object) -> list[dict]:
+    """Приводит результат rag_search к плоскому списку найденных артефактов.
+
+    ``invoke_with_tools(return_tool_results=True)`` возвращает список
+    envelope-объектов ``[{"results": [...]}]``, а прямой вызов реестра —
+    один envelope-объект ``{"results": [...]}``. Оба случая сводим к списку
+    самих найденных записей, чтобы итерировать их напрямую.
+    """
+    if isinstance(raw, dict) and "results" in raw:
+        return raw["results"]
+    if isinstance(raw, list):
+        out: list[dict] = []
+        for item in raw:
+            if isinstance(item, dict) and "results" in item:
+                out.extend(item["results"])
+            elif isinstance(item, dict):
+                out.append(item)
+        return out
+    return []
+
+
 def _prepare_requirements_data(requirements: list[dict]) -> list[dict]:
     return [
         {
@@ -171,15 +192,21 @@ def run_coverage_agent(
                     )
                     registry = ToolRegistry()
                     rag_tool = next(
-                        t for t in registry.tools if t["function"]["name"] == "rag_search"
+                        t
+                        for t in registry.tools_for_agent("coverage_agent")
+                        if t["function"]["name"] == "rag_search"
                     )
                     similar_tests: list[dict] = []
                     try:
+                        skill_reference = registry.reference_for_agent("coverage_agent")
+                        rag_system_prompt = (
+                            "Используй инструмент rag_search, чтобы найти семантически "
+                            "похожие тест-кейсы по тексту требований."
+                        )
+                        if skill_reference:
+                            rag_system_prompt = skill_reference + "\n\n" + rag_system_prompt
                         similar_raw = llm.invoke_with_tools(
-                            system_prompt=(
-                                "Используй инструмент rag_search, чтобы найти семантически "
-                                "похожие тест-кейсы по тексту требований."
-                            ),
+                        system_prompt=rag_system_prompt,
                             user_message=(
                                 "Найди похожие тест-кейсы (коллекция test_cases) по тексту "
                                 f"требований:\n{combined_req_text}"
@@ -189,10 +216,11 @@ def run_coverage_agent(
                             return_tool_results=True,
                             tool_choice={"type": "function", "function": {"name": "rag_search"}},
                         )
-                        similar_tests = json.loads(similar_raw)
+                        similar_tests = _flatten_rag_results(json.loads(similar_raw))
                     except Exception as e:
                         logger.warning(f"invoke_with_tools rag_search failed, using registry: {e}")
-                        similar_tests = registry.execute(
+                        similar_tests = registry.execute_for_agent(
+                            "coverage_agent",
                             "rag_search",
                             {
                                 "collection": "test_cases",
@@ -200,20 +228,20 @@ def run_coverage_agent(
                                 "top_k": settings.rag_top_k,
                             },
                         )
-                        # registry.execute возвращает list, но на всякий случай
-                        # защищаемся от dict-обёртки ({"results": [...]}).
-                        if isinstance(similar_tests, dict):
-                            similar_tests = similar_tests.get("results", [])
-                        if not isinstance(similar_tests, list):
-                            similar_tests = []
+                        # rag_search возвращает конверт {"results": [...], "error": ...};
+                        # единообразно извлекаем список.
+                        similar_tests = _flatten_rag_results(similar_tests)
                     similar_tests_json = json.dumps(
                         [
                             {
-                                "test_case_id": st["id"],
-                                "title": st["title"],
-                                "similarity": round(st["similarity"], 3),
+                                "test_case_id": st.get("id")
+                                or st.get("test_case_id")
+                                or st.get("requirement_id"),
+                                "title": st.get("title", ""),
+                                "similarity": round(st.get("similarity", 0), 3),
                             }
                             for st in similar_tests
+                            if isinstance(st, dict)
                         ],
                         ensure_ascii=False,
                     )
