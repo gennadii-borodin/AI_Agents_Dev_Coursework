@@ -1,0 +1,14 @@
+{
+  "Servers": {
+    "1": {
+      "Name": "QA Review Postgres",
+      "Group": "Servers",
+      "Host": "postgres",
+      "Port": 5432,
+      "MaintenanceDB": "qa_review",
+      "Username": "qa_user",
+      "Password": "qa_password",
+      "SSLMode": "prefer"
+    }
+  }
+}
