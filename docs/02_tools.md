@@ -125,13 +125,13 @@ flowchart TD
 
 ```mermaid
 flowchart TD
-    A[Agent вызывает rag_search collection,query,top_k] --> B[EmbeddingProvider.embed_text]
-    B -->|fail| Z[log + return []]
-    B --> C{collection in<br/>requirements, test_cases?}
-    C -->|нет| Y[log warning + return []]
-    C -->|да| D[SQL: ORDER BY embedding <=> query LIMIT top_k]
-    D -->|OK| E[map rows -> {id,title,content,similarity}]
-    D -.exception.-> F[log + return []]
+    A["Agent вызывает rag_search(collection, query, top_k)"] --> B["EmbeddingProvider.embed_text"]
+    B -->|fail| Z["log + return []"]
+    B --> C{"collection in<br/>requirements, test_cases?"}
+    C -->|нет| Y["log warning + return []"]
+    C -->|да| D["SQL: ORDER BY embedding <=> query LIMIT top_k"]
+    D -->|OK| E["map rows → {id, title, content, similarity}"]
+    D -.exception.-> F["log + return []"]
 ```
 
 - Косинусное сходство: `1 - (embedding <=> %s::vector)` (оператор `<=>` pgvector, `src/tools/rag_tool.py:45`).

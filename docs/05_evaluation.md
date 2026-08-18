@@ -102,13 +102,13 @@ run_span.set_attribute("qa.estimated_cost_usd", round(est_cost, 4))
 
 ```mermaid
 flowchart TD
-    IN[Запрос пользователя] --> TR[trace_run: session_id, mask_sensitive]
-    TR --> AGL[LLM/embedding: @retry x3]
-    AGL --> TO[Tool: SQL forbidden-kw block, rag [] on fail]
-    TO --> OUT[LLM output: json_schema + json_repair]
-    OUT --> CALC[Детерминированный пересчёт метрик]
-    CALC --> QG[quality_gate: retry/limit]
-    QG --> MET[Метрики: status, latency, tokens, $]
-    MET --> SPAN[Phoenix spans + mask_sensitive]
-    SPAN --> REP[Markdown отчёты + final_answer]
+    IN["Запрос пользователя"] --> TR["trace_run: session_id, mask_sensitive"]
+    TR --> AGL["LLM/embedding: @retry x3"]
+    AGL --> TO["Tool: SQL forbidden-kw block, rag [] on fail"]
+    TO --> OUT["LLM output: json_schema + json_repair"]
+    OUT --> CALC["Детерминированный пересчёт метрик"]
+    CALC --> QG["quality_gate: retry/limit"]
+    QG --> MET["Метрики: status, latency, tokens, $"]
+    MET --> SPAN["Phoenix spans + mask_sensitive"]
+    SPAN --> REP["Markdown отчёты + final_answer"]
 ```

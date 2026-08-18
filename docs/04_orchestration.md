@@ -65,11 +65,11 @@ flowchart TD
 
 ```mermaid
 flowchart TD
-    Q[quality_gate] --> C{есть missing отчёты?}
-    C -->|нет| FIN[aggregate final_answer]
-    C -->|да| R{targeted_retry_enabled<br/>AND iteration <= max_retry_attempts?}
-    R -->|да| S[Command goto=Send(missing agents)]
-    S --> AG[повтор ONLY упавших]
+    Q["quality_gate"] --> C{"есть missing отчёты?"}
+    C -->|нет| FIN["aggregate final_answer"]
+    C -->|да| R{"targeted_retry_enabled<br/>AND iteration <= max_retry_attempts?"}
+    R -->|да| S["Command goto=Send(missing agents)"]
+    S --> AG["повтор ONLY упавших"]
     AG --> Q
     R -->|нет| FIN
 ```
